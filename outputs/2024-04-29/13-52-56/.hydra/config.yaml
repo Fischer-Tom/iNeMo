@@ -1,0 +1,110 @@
+wandb:
+  project: iNeMo
+  notes: placeholder
+  mode: disabled
+seed: 101010
+mode: train
+checkpointing:
+  load_path: null
+  save_path: null
+data_loader:
+  train:
+    num_workers: 16
+    persistent_workers: true
+    batch_size: 16
+    seed: 1234
+  test:
+    num_workers: 4
+    persistent_workers: false
+    batch_size: 1
+    seed: 2345
+optimizer:
+  update_lr_epoch_n: 10
+  update_lr_: 0.2
+  lr: 1.0e-05
+  weight_decay: 0.0001
+dataset:
+  paths:
+    train_path: /home/noah00001/Desktop/dataset/PASCAL3D_train_NeMo
+    test_path: /home/noah00001/Desktop/dataset/PASCAL3D_val_NeMo
+    mesh_path: /home/noah00001/Desktop/dataset/PASCAL3D+_release1.1/CAD_single
+    image_folder: images
+    list_folder: lists3D
+    anno_folder: annotations3D
+    dtd_path: /home/noah00001/Desktop/dataset
+  name: Pascal3D
+  root_path: null
+  seen_classes: null
+  for_test: null
+  augment: true
+  image_shape:
+  - 640
+  - 800
+  memory_budget: 240
+  viewport: 3000
+  focal_length: 1
+  classes:
+  - aeroplane
+  - bicycle
+  - boat
+  - bottle
+  - bus
+  - car
+  - chair
+  - diningtable
+  - motorbike
+  - sofa
+  - train
+  - tvmonitor
+  etf_init: 20
+  class_increment: 3
+nemo:
+  nemo:
+    local_size: 1
+    d_feature: 128
+    distance_thr: 6
+    weight_noise: 0.004
+    num_noise: 5
+    max_group: 512
+    backbone: resnetext
+    separate_bank: true
+  incremental:
+    increment_epoch: 50
+    subsequent_increment_epoch: 50
+    exemplar_strategy: pose_aware
+    n_tasks: 4
+    num_replay: 1
+    white_hole: 1
+    run_tsne: false
+    memory_budget: 240
+  train:
+    pos_reg: 0.2
+    kd_reg: 10.0
+    freeze_first_n_epochs: 0
+    kappa_main: 14.3
+    kappa_kd: 0.5
+    kappa_pos: 1.0
+  inference:
+    inf_epochs: 30
+    inf_bs: 8
+    inf_lr: 0.05
+    inf_adam_beta_0: 0.4
+    inf_adam_beta_1: 0.6
+    inf_adam_eps: 1.0e-08
+    inf_adam_weight_decay: 0
+model:
+  num_clutter: 5
+  mesh_dim: 128
+  weight_noise: 0.005
+  extractor:
+    name: resnetext
+    extractor_dim: 256
+    local_size: 1
+    pretrain: true
+    downsample_rate: 8
+  mesh:
+    distance_thr: 6
+    bank_size: 512
+    momentum: 0.9
+    max_n: null
+    n_list: null

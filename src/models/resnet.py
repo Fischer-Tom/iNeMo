@@ -64,9 +64,15 @@ class ResNetExt(nn.Module):
         x1 = self.extractor(x)
         x2 = self.extractor1(x1)
         x3 = self.extractor2(x2)
-        features = self.upsample2(self.upsample1(self.upsample0(x3), x2), x1)
+        up1 = self.upsample0(x3)
+        up2 = self.upsample1(up1, x2)
+        up3 = self.upsample2(up2, x1)
+        features = up3
 
-        return features
+        return {
+            'fmaps': [x1, x2, x3, up1, up2, up3],
+            'features': features
+        }
 
     def bottleneck(self, x):
         return F.adaptive_avg_pool2d(

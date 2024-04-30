@@ -84,7 +84,8 @@ class IncrementalDataset(Dataset):
         exemplars_per_class = self.cfg.memory_budget // len(self.cfg.seen_classes)
         self._reduce_exemplars(exemplars_per_class)
         self.exemplars_per_class = exemplars_per_class
-        self._build_exemplars()
+        # Add exemplars to memory
+        self.memory += self._build_exemplars()
 
     def _reduce_exemplars(self, new_exemplars_per_class):
         if self._len_replay == 0:

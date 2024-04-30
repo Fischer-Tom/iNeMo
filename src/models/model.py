@@ -47,7 +47,9 @@ class FeatureExtractor(nn.Module):
 
     @torch.no_grad()
     def _forward_inference(self, img):
-        f = self.net(img)
+        out = self.net(img)
+        f = out["features"] 
+
         mesh_f = F.conv2d(
             f,
             self.out_layer.weight.unsqueeze(2).unsqueeze(3),
@@ -57,7 +59,9 @@ class FeatureExtractor(nn.Module):
 
     def _forward_train(self, img, keypoint_positions, obj_mask):
         b, _, h, w = img.shape  # n = 1
-        f = self.net(img)
+        out = self.net(img)
+        f = out["features"] 
+
 
         kp = self.converter(f)
         keypoint_idx = keypoints_to_pixel_index(
@@ -78,4 +82,4 @@ class FeatureExtractor(nn.Module):
         kp = self.l2_norm(self.out_layer(kp), 2)
         kp = kp.view(b, -1, self.out_layer.weight.shape[0])
 
-        return kp
+        return kp, out["fmaps"]

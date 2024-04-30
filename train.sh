@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ROOT="/home/fischer/iNeMo/"
+ROOT="/home/noah00001/Desktop/projects/iNeMo"
 
 cd $ROOT
 

@@ -45,6 +45,7 @@ class ValidationCfg:
 class ParamCfg:
     pos_reg: float
     kd_reg: float
+    spatial_reg:float
     kappa_main: float
     kappa_kd: float
     kappa_pos: float
@@ -104,7 +105,7 @@ class BaseTrainer:
         )
         return img, img_label, idx, pose
 
-    def train_epoch(self, loader):
+    def train_epoch(self, loader, epoch=0):
         self.net.train()
 
         with tqdm(loader, unit="batch") as tepoch:
@@ -113,7 +114,8 @@ class BaseTrainer:
 
                 loss, loss_pos_reg, loss_kd = self._train_step(img, label, idx, pose)
 
-                tepoch.set_postfix( nemo_loss=loss,
+                tepoch.set_postfix( epoch=epoch,
+                                    nemo_loss=loss,
                                     kd_loss=loss_kd,
                                     pos_reg_loss=loss_pos_reg)
 
@@ -181,12 +183,12 @@ class BaseTrainer:
                 sample = default_collate([sample])
                 img, label, idx, pose = self._to_device(sample)
                 keypoint, kpvis, mask, projection = self._annotate(pose, label)
-                features = self.net(img, kp=keypoint, mask=mask)
+                features, _ = self.net(img, kp=keypoint, mask=mask)
 
                 _, _ = self.mesh_memory.forward(features, kpvis, label, updateVertices=False)
     def _train_step(self, img, label, idx, pose):
         keypoint, kpvis, mask, projection = self._annotate(pose, label)
-        features = self.net(img, kp=keypoint, mask=1-mask)
+        features, fmaps = self.net(img, kp=keypoint, mask=1-mask)
 
         similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
         neighborhood_mask = self._remove_neighbors(keypoint, label)
@@ -199,7 +201,6 @@ class BaseTrainer:
         nemo_loss = self.criterion(self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis])
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
 
-
         loss_pos_reg = torch.tensor(0.0, device=img.device)
         loss_kd = torch.tensor(0.0, device=img.device)
 
@@ -210,13 +211,46 @@ class BaseTrainer:
                 reg_labels[kpvis],
             )
         if self.old_net is not None and self.param_cfg.kd_reg >= 0.0:
-            loss_kd = self._kd_loss(img, keypoint, mask,kpvis, features)
+            loss_kd = self._kd_loss(img, keypoint, mask, kpvis, features, fmaps)
+            # spatial lambda also needs to be defined, pod net paper sets the weight for the pod spatial loss as 3
+            # And the flat kd loss as 1.
+
         loss = nemo_loss + noise_loss
         combined_loss = loss + self.param_cfg.pos_reg * loss_pos_reg + self.param_cfg.kd_reg * loss_kd
         self.optimizer.zero_grad()
         combined_loss.backward()
         self.optimizer.step()
         return loss.item(), loss_pos_reg.item(), loss_kd.item()
+
+    def pod_spatial_loss(self,old_fmaps,fmaps,normalize=True):
+        """
+        a, b: list of [bs, c, w, h]
+        """
+        loss = torch.tensor(0.0).to(fmaps[0].device)
+        for i, (a, b) in enumerate(zip(old_fmaps, fmaps)):
+            assert a.shape == b.shape, "Shape error"
+
+            # a, b pair could look like to following: bs,16,32,32
+
+            a = torch.pow(a, 2)
+            b = torch.pow(b, 2)
+
+            a_h = a.sum(dim=3).view(a.shape[0], -1)  # [bs, c*w]
+            b_h = b.sum(dim=3).view(b.shape[0], -1)  # [bs, c*w]
+            a_w = a.sum(dim=2).view(a.shape[0], -1)  # [bs, c*h]
+            b_w = b.sum(dim=2).view(b.shape[0], -1)  # [bs, c*h]
+
+            a = torch.cat([a_h, a_w], dim=-1)
+            b = torch.cat([b_h, b_w], dim=-1)
+
+            if normalize:
+                a = F.normalize(a, dim=1, p=2)
+                b = F.normalize(b, dim=1, p=2)
+
+            layer_loss = torch.mean(torch.frobenius_norm(a - b, dim=-1))
+            loss += layer_loss
+
+        return loss / len(fmaps)
 
     def _annotate(self, pose, label):
         annotations = self.renderer.get_annotations(
@@ -229,9 +263,8 @@ class BaseTrainer:
         )
         return annotations
 
-    def _kd_loss(self, img, keypoints, mask, kpvis, new_feats):
-
-        old_feats = self.old_net(img, kp=keypoints, mask=1-mask)
+    def _kd_loss(self, img, keypoints, mask, kpvis, new_feats, new_fmaps):
+        old_feats, old_fmaps = self.old_net(img, kp=keypoints, mask=1-mask)
         old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
         new_similarity = self.mesh_memory.forward_kd(new_feats, self.n_prev_classes)
 
@@ -242,7 +275,12 @@ class BaseTrainer:
             self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
         )
         kd_loss = F.kl_div(soft_probs, soft_targets, reduction="batchmean", log_target=True)
+
+        # Apply this + the spatial kd loss
+        kd_loss += self.param_cfg.spatial_reg * self.pod_spatial_loss(old_fmaps[:-1], new_fmaps[:-1])
+
         return kd_loss
+    
     @torch.no_grad()
     def _remove_neighbors(self, keypoints, img_label):
         zeros = torch.zeros(

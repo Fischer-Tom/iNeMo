@@ -24,6 +24,7 @@ incremental:
 train:
   pos_reg: 0.2
   kd_reg: 10.0
+  spatial_reg: 3.0 # from podnet paper
   freeze_first_n_epochs: 0
   kappa_main: 14.3
   kappa_kd: 0.5

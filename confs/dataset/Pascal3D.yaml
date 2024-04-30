@@ -1,11 +1,11 @@
 paths:
-  train_path: "/share_chairilg/data/Pascal3D+/PASCAL3D_train_NeMo"
-  test_path: "/share_chairilg/data/Pascal3D+/PASCAL3D_val_NeMo"
-  mesh_path: "/share_chairilg/data/Pascal3D+/CAD_single"
+  train_path: "/home/noah00001/Desktop/dataset/PASCAL3D_train_NeMo"
+  test_path: "/home/noah00001/Desktop/dataset/PASCAL3D_val_NeMo"
+  mesh_path: "/home/noah00001/Desktop/dataset/PASCAL3D+_release1.1/CAD_single"
   image_folder: "images"
   list_folder: "lists3D"
   anno_folder: "annotations3D"
-  dtd_path: "/share_chairilg/data/describable_textures_dataset"
+  dtd_path: "/home/noah00001/Desktop/dataset"
 
 name: "Pascal3D"
 root_path: ~

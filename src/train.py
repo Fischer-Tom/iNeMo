@@ -143,8 +143,8 @@ def train(trainer, dataset, cfg):
             if n == 0
             else cfg.nemo.incremental.subsequent_increment_epoch
         )
-        # if n == 0:
-        #     continue
+        if n == 0:
+            continue
         for epoch in range(n_epochs):
             trainer.train_epoch(train_loader, epoch=epoch)
 

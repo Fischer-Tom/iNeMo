@@ -211,9 +211,8 @@ class BaseTrainer:
                 reg_labels[kpvis],
             )
         if self.old_net is not None and self.param_cfg.kd_reg >= 0.0:
+            # pod net paper sets the weight for the pod spatial loss as 3 And the flat kd loss as 1.
             loss_kd = self._kd_loss(img, keypoint, mask, kpvis, features, fmaps)
-            # spatial lambda also needs to be defined, pod net paper sets the weight for the pod spatial loss as 3
-            # And the flat kd loss as 1.
 
         loss = nemo_loss + noise_loss
         combined_loss = loss + self.param_cfg.pos_reg * loss_pos_reg + self.param_cfg.kd_reg * loss_kd
@@ -268,16 +267,25 @@ class BaseTrainer:
         old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
         new_similarity = self.mesh_memory.forward_kd(new_feats, self.n_prev_classes)
 
-        soft_targets = F.log_softmax(
-            self.param_cfg.kd_reg * old_similarity[kpvis, :], dim=-1
-        )
-        soft_probs = F.log_softmax(
-            self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
-        )
-        kd_loss = F.kl_div(soft_probs, soft_targets, reduction="batchmean", log_target=True)
+        # breakpoint()
+
+        # Original KD loss
+        # soft_targets = F.log_softmax(
+        #     self.param_cfg.kd_reg * old_similarity[kpvis, :], dim=-1
+        # )
+        # soft_probs = F.log_softmax(
+        #     self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
+        # )
+        # kd_loss = F.kl_div(soft_probs, soft_targets, reduction="batchmean", log_target=True)
+
+
+        # Apply flat loss here 
+        flat_loss = F.cosine_embedding_loss(new_similarity[kpvis, :], old_similarity[kpvis, :], torch.ones(kpvis.sum()).to(kpvis.device))
 
         # Apply this + the spatial kd loss
-        kd_loss += self.param_cfg.spatial_reg * self.pod_spatial_loss(old_fmaps[:-1], new_fmaps[:-1])
+        spatial_loss = self.param_cfg.spatial_reg * self.pod_spatial_loss(old_fmaps[:-1], new_fmaps[:-1])
+
+        kd_loss = flat_loss + spatial_loss
 
         return kd_loss
     

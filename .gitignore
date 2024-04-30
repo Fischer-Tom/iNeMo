@@ -160,7 +160,7 @@ cython_debug/
 
 
 # Hydra
-output/
+outputs/
 
 # Weights and Biases
 wandb/

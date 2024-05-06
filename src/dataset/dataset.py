@@ -46,17 +46,14 @@ class IncrementalDataset(Dataset):
         self._dtd = DTD(self.cfg.paths.dtd_path, split=split)
 
     def next_task_classes(self):
+        class_increment = len(self.cfg.classes) // self.cfg.n_tasks
         start_index = (
             0
             if (self.cfg.seen_classes is None or self.cfg.for_test)
             else len(self.cfg.seen_classes)
         )
-        task_categories = self.cfg.classes[
-            start_index : start_index + self.cfg.class_increment
-        ]
-        self.cfg.seen_classes = self.cfg.classes[
-            : start_index + self.cfg.class_increment
-        ]
+        task_categories = self.cfg.classes[start_index : start_index + class_increment]
+        self.cfg.seen_classes = self.cfg.classes[: start_index + class_increment]
         return task_categories
 
     def setup_task(self):
@@ -84,7 +81,7 @@ class IncrementalDataset(Dataset):
         exemplars_per_class = self.cfg.memory_budget // len(self.cfg.seen_classes)
         self._reduce_exemplars(exemplars_per_class)
         self.exemplars_per_class = exemplars_per_class
-        self._build_exemplars()
+        self.memory += self._build_exemplars()
 
     def _reduce_exemplars(self, new_exemplars_per_class):
         if self._len_replay == 0:
@@ -97,7 +94,9 @@ class IncrementalDataset(Dataset):
             current_poses_azimuth = torch.tensor(
                 [
                     self.memory[j]["pose"][2]
-                    for j in torch.arange(start, start + self.exemplars_per_class, step=1)
+                    for j in torch.arange(
+                        start, start + self.exemplars_per_class, step=1
+                    )
                 ]
             )
             torch.rad2deg_(current_poses_azimuth)
@@ -128,15 +127,19 @@ class IncrementalDataset(Dataset):
                         considered, dtype=torch.float32
                     ).multinomial(
                         num_samples=min(
-                            new_exemplars_per_class // (len(bin_edges) - 1), len(considered)
+                            new_exemplars_per_class // (len(bin_edges) - 1),
+                            len(considered),
                         )
                     )
                     n_samples += [
-                        self.memory[considered[choose_1] + start] for choose_1 in choose_2
+                        self.memory[considered[choose_1] + start]
+                        for choose_1 in choose_2
                     ]
             if len(n_samples) < new_exemplars_per_class:
                 left = new_exemplars_per_class - len(n_samples)
-                indices = np.random.random_integers(start, start + self.exemplars_per_class - 1, left)
+                indices = np.random.random_integers(
+                    start, start + self.exemplars_per_class - 1, left
+                )
                 n_samples += [self.memory[index] for index in indices]
             exemplars += n_samples
             start += self.exemplars_per_class
@@ -182,7 +185,8 @@ class IncrementalDataset(Dataset):
                         considered, dtype=torch.float32
                     ).multinomial(
                         num_samples=min(
-                            self.exemplars_per_class // (len(bin_edges) - 1), len(considered)
+                            self.exemplars_per_class // (len(bin_edges) - 1),
+                            len(considered),
                         )
                     )
                     n_samples += [

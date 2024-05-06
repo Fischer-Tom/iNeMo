@@ -199,8 +199,8 @@ class MeshMemory(nn.Module):
         return similarity, labels
 
     def label_to_onehot(self, img_label, count_label):
-        ret = torch.zeros(img_label.shape[0], self.n_classes).to(img_label.device)
-        ret = ret.scatter_(1, img_label.unsqueeze(1), 1.0).to(img_label.device)
+        ret = torch.zeros(img_label.shape[0], self.n_classes, device=img_label.device)
+        ret = ret.scatter_(1, img_label.unsqueeze(1), 1.0)
         for i in range(self.n_classes):
             count = count_label[i]
             if count == 0:

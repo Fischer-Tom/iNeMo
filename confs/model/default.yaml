@@ -16,5 +16,3 @@ mesh:
   momentum: 0.9
   max_n: ~
   n_list: ~
-
-

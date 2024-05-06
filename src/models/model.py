@@ -7,9 +7,12 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.lib.config_utils import flatten_config
-from src.lib.mesh_utils import (GlobalLocalConverter, batched_index_select,
-                                get_noise_pixel_index,
-                                keypoints_to_pixel_index)
+from src.lib.mesh_utils import (
+    GlobalLocalConverter,
+    batched_index_select,
+    get_noise_pixel_index,
+    keypoints_to_pixel_index,
+)
 from src.models.factory import resnetext
 
 
@@ -33,7 +36,7 @@ class FeatureExtractor(nn.Module):
         model_cfg = deepcopy(cfg)
         del model_cfg.mesh
         self.cfg = flatten_config(model_cfg)
-        self.net = resnetext(self.cfg)
+        self.net = torch.compile(resnetext(self.cfg), mode="reduce-overhead")
         self.out_layer = nn.Linear(
             self.cfg.extractor_dim,
             self.cfg.mesh_dim,

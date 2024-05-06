@@ -11,11 +11,12 @@ from torch.utils.data import default_collate
 import torch.nn.functional as F
 import wandb
 
-from src.lib.inference_utils import (cal_pose_err, get_init_pose, loss_fun,
-                                     pre_render)
-from src.lib.mesh_utils import (cal_rotation_matrix,
-                                camera_position_to_spherical_angle,
-                                get_cube_proj)
+from src.lib.inference_utils import cal_pose_err, get_init_pose, loss_fun, pre_render
+from src.lib.mesh_utils import (
+    cal_rotation_matrix,
+    camera_position_to_spherical_angle,
+    get_cube_proj,
+)
 from src.lib.renderer import MeshInterpolateModule
 
 
@@ -40,6 +41,7 @@ class ValidationCfg:
     inf_adam_beta_1: float = 0.6
     inf_adam_eps: float = 1e-8
     inf_adam_weight_decay: float = 0.0
+
 
 @dataclass
 class ParamCfg:
@@ -72,6 +74,12 @@ class BaseTrainer:
     def set_optimizer(self, optim):
         self.optimizer = optim
 
+    def lr_update(self, epoch, cfg):
+        if (epoch - 1) % cfg.update_lr_epoch_n == 0:
+            lr = cfg.lr * cfg.update_lr_
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = lr
+
     def set_current_pad_index(self, n_seen_classes):
         self.current_task_id += 1
         self.current_pad_index = torch.tensor(
@@ -82,7 +90,9 @@ class BaseTrainer:
             ],
             dtype=torch.long,
         )
-        self.n_prev_classes = 0 if self.n_classes is None else n_seen_classes - self.n_classes
+        self.n_prev_classes = (
+            0 if self.n_classes is None else n_seen_classes - self.n_classes
+        )
         self.n_classes = n_seen_classes
 
     def set_old_net(self):
@@ -113,15 +123,15 @@ class BaseTrainer:
 
                 loss, loss_pos_reg, loss_kd = self._train_step(img, label, idx, pose)
 
-                tepoch.set_postfix( nemo_loss=loss,
-                                    kd_loss=loss_kd,
-                                    pos_reg_loss=loss_pos_reg)
+                tepoch.set_postfix(
+                    nemo_loss=loss, kd_loss=loss_kd, pos_reg_loss=loss_pos_reg
+                )
 
     def validate(self, loader, run_pe=False):
         self.net.eval()
         class_preds, class_gds, pose_errors = [
-                                                  torch.tensor([], dtype=torch.float32)
-                                              ] * 3
+            torch.tensor([], dtype=torch.float32)
+        ] * 3
 
         compare_bank = rearrange(
             self.mesh_memory.memory[: self.n_classes], "b c v -> b v c"
@@ -157,8 +167,12 @@ class BaseTrainer:
                     )
                     pose_errors = torch.cat((pose_errors, pose_error), dim=0)
 
-                    pose_acc_pi6 = torch.mean((pose_errors < torch.pi / 6).float()).item()
-                    pose_acc_pi18 = torch.mean((pose_errors < torch.pi / 18).float()).item()
+                    pose_acc_pi6 = torch.mean(
+                        (pose_errors < torch.pi / 6).float()
+                    ).item()
+                    pose_acc_pi18 = torch.mean(
+                        (pose_errors < torch.pi / 18).float()
+                    ).item()
                 else:
                     pose_acc_pi6 = 0.0
                     pose_acc_pi18 = 0.0
@@ -170,8 +184,15 @@ class BaseTrainer:
                     pi6=pose_acc_pi6,
                     pi18=pose_acc_pi18,
                 )
-        wandb.log({"Validation Accuracy": accuracy, "Validation Pose Error (pi/6)": pose_acc_pi6,
-                   "Validation Pose Error (pi/18)": pose_acc_pi18}, step=self.current_task_id)
+        wandb.log(
+            {
+                "Validation Accuracy": accuracy,
+                "Validation Pose Error (pi/6)": pose_acc_pi6,
+                "Validation Pose Error (pi/18)": pose_acc_pi18,
+            },
+            step=self.current_task_id,
+        )
+
     @torch.no_grad()
     def fill_background_model(self, replay_memory):
         bank_size = self.mesh_memory.cfg.bank_size
@@ -183,10 +204,13 @@ class BaseTrainer:
                 keypoint, kpvis, mask, projection = self._annotate(pose, label)
                 features = self.net(img, kp=keypoint, mask=mask)
 
-                _, _ = self.mesh_memory.forward(features, kpvis, label, updateVertices=False)
+                _, _ = self.mesh_memory.forward(
+                    features, kpvis, label, updateVertices=False
+                )
+
     def _train_step(self, img, label, idx, pose):
         keypoint, kpvis, mask, projection = self._annotate(pose, label)
-        features = self.net(img, kp=keypoint, mask=1-mask)
+        features = self.net(img, kp=keypoint, mask=1 - mask)
 
         similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
         neighborhood_mask = self._remove_neighbors(keypoint, label)
@@ -196,9 +220,10 @@ class BaseTrainer:
         kpvis = rearrange(kpvis, "b c -> (b c)").type(torch.bool)
         idx = rearrange(idx, "b c -> (b c)")
 
-        nemo_loss = self.criterion(self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis])
+        nemo_loss = self.criterion(
+            self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis]
+        )
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
-
 
         loss_pos_reg = torch.tensor(0.0, device=img.device)
         loss_kd = torch.tensor(0.0, device=img.device)
@@ -210,12 +235,17 @@ class BaseTrainer:
                 reg_labels[kpvis],
             )
         if self.old_net is not None and self.param_cfg.kd_reg >= 0.0:
-            loss_kd = self._kd_loss(img, keypoint, mask,kpvis, features)
+            loss_kd = self._kd_loss(img, keypoint, mask, kpvis, features)
         loss = nemo_loss + noise_loss
-        combined_loss = loss + self.param_cfg.pos_reg * loss_pos_reg + self.param_cfg.kd_reg * loss_kd
+        combined_loss = (
+            loss
+            + self.param_cfg.pos_reg * loss_pos_reg
+            + self.param_cfg.kd_reg * loss_kd
+        )
         self.optimizer.zero_grad()
         combined_loss.backward()
         self.optimizer.step()
+
         return loss.item(), loss_pos_reg.item(), loss_kd.item()
 
     def _annotate(self, pose, label):
@@ -231,7 +261,7 @@ class BaseTrainer:
 
     def _kd_loss(self, img, keypoints, mask, kpvis, new_feats):
 
-        old_feats = self.old_net(img, kp=keypoints, mask=1-mask)
+        old_feats = self.old_net(img, kp=keypoints, mask=1 - mask)
         old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
         new_similarity = self.mesh_memory.forward_kd(new_feats, self.n_prev_classes)
 
@@ -241,8 +271,11 @@ class BaseTrainer:
         soft_probs = F.log_softmax(
             self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
         )
-        kd_loss = F.kl_div(soft_probs, soft_targets, reduction="batchmean", log_target=True)
+        kd_loss = F.kl_div(
+            soft_probs, soft_targets, reduction="batchmean", log_target=True
+        )
         return kd_loss
+
     @torch.no_grad()
     def _remove_neighbors(self, keypoints, img_label):
         zeros = torch.zeros(
@@ -294,8 +327,6 @@ class BaseTrainer:
                 dim=2,
             )
 
-
-
     @torch.no_grad()
     def _classify(self, compare_bank, pred_features, clutter_score):
         flat_features = rearrange(pred_features, "b c h w -> b c (h w)")
@@ -338,7 +369,6 @@ class BaseTrainer:
                 xface.cuda(),
                 compare_bank[cls_pred[b]],
                 self.renderer.rasterizer,
-                # post_process=center_crop_fun(map_shape, (render_image_size,) * 2),
             )
             inter_module = inter_module.cuda()
 

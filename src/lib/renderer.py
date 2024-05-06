@@ -4,15 +4,21 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig, ListConfig, open_dict
-from pytorch3d.renderer import (MeshRasterizer, PerspectiveCameras,
-                                RasterizationSettings,
-                                camera_position_from_spherical_angles)
+from pytorch3d.renderer import (
+    MeshRasterizer,
+    PerspectiveCameras,
+    RasterizationSettings,
+    camera_position_from_spherical_angles,
+)
 from pytorch3d.renderer.mesh import utils as p3d_utils
 from pytorch3d.renderer.mesh.rasterizer import Fragments
 from pytorch3d.structures import Meshes
 
-from src.lib.mesh_utils import (campos_to_R_T, pre_process_mesh_pascal,
-                                set_bary_coords_to_nearest)
+from src.lib.mesh_utils import (
+    campos_to_R_T,
+    pre_process_mesh_pascal,
+    set_bary_coords_to_nearest,
+)
 
 
 @dataclass

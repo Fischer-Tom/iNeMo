@@ -133,7 +133,7 @@ def setup_task(trainer, dataset, cfg):
 
 
 def train(trainer, dataset, cfg):
-    for n in range(cfg.nemo.incremental.n_tasks):
+    for n in range(dataset.cfg.n_tasks):
         train_loader, test_loader, optim = setup_task(trainer, dataset, cfg)
         if n > 0:
             trainer.set_old_net()
@@ -142,9 +142,8 @@ def train(trainer, dataset, cfg):
             if n == 0
             else cfg.nemo.incremental.subsequent_increment_epoch
         )
-        if n == 0:
-            continue
         for epoch in range(n_epochs):
+            trainer.lr_update(epoch, cfg=cfg.optimizer)
             trainer.train_epoch(train_loader)
 
         # Fill Replay Memory
@@ -156,6 +155,8 @@ def train(trainer, dataset, cfg):
         # Validate
         trainer.validate(test_loader, run_pe=False)
 
+        # Save Model and Config
+        # TODO: Add Model Saving
 
 
 @hydra.main(version_base="1.3", config_path="../confs", config_name="main")

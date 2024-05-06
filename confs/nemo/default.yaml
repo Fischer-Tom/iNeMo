@@ -15,7 +15,6 @@ incremental:
   increment_epoch: 50
   subsequent_increment_epoch: 50
   exemplar_strategy: pose_aware
-  n_tasks: 4
   num_replay: 1
   white_hole: 1
   run_tsne: False

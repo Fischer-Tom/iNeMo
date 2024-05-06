@@ -44,7 +44,7 @@ def keypoints_to_pixel_index(keypoints, img_size: tuple):
 def get_noise_pixel_index(keypoints, max_size, n_samples, obj_mask=None):
     n = keypoints.shape[0]
     # remove the point in keypoints by set probability to 0 otherwise 1 -> mask [n, size] with 0 or 1
-    mask = torch.ones((n, max_size), dtype=torch.float32).to(keypoints.device)
+    mask = torch.ones((n, max_size), dtype=torch.float32, device=keypoints.device)
     mask = mask.scatter(1, keypoints.type(torch.long), 0.0)
     if obj_mask is not None:
         mask = obj_mask.view(n, -1)

@@ -3,10 +3,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import tensor as Tensor
 from pytorch3d.renderer import look_at_rotation
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.lib.renderer import MeshInterpolateModule
 
 
-def load_off(off_file_name, to_torch=False):
+def load_off(off_file_name: str, to_torch=False) -> tuple:
     file_handle = open(off_file_name)
 
     file_list = file_handle.readlines()
@@ -28,20 +33,22 @@ def load_off(off_file_name, to_torch=False):
         return array_, array_int.reshape((-1, 4))[:, 1::]
 
 
-def batched_index_select(t, dim, inds):
+def batched_index_select(t: Tensor, dim: int, inds: Tensor) -> Tensor:
     dummy = inds.unsqueeze(2).expand(inds.size(0), inds.size(1), t.size(2))
     out = t.gather(dim, dummy)  # b * e * f
     return out
 
 
-def keypoints_to_pixel_index(keypoints, img_size: tuple):
+def keypoints_to_pixel_index(keypoints: Tensor, img_size: tuple) -> Tensor:
     line_size = img_size[1]
     return (keypoints[:, :, 0] * line_size + keypoints[:, :, 1]).clamp(
         min=0, max=img_size[0] * img_size[1] - 1
     )
 
 
-def get_noise_pixel_index(keypoints, max_size, n_samples, obj_mask=None):
+def get_noise_pixel_index(
+    keypoints: Tensor, max_size: int, n_samples: int, obj_mask=None
+) -> Tensor:
     n = keypoints.shape[0]
     # remove the point in keypoints by set probability to 0 otherwise 1 -> mask [n, size] with 0 or 1
     mask = torch.ones((n, max_size), dtype=torch.float32, device=keypoints.device)
@@ -53,25 +60,25 @@ def get_noise_pixel_index(keypoints, max_size, n_samples, obj_mask=None):
 
 
 class GlobalLocalConverter(nn.Module):
-    def __init__(self, local_size):
+    def __init__(self, local_size: int) -> None:
         super().__init__()
         self.local_size = local_size
         self.padding = sum(([t - 1 - t // 2, t // 2] for t in local_size[::-1]), [])
 
-    def forward(self, X):
+    def forward(self, X: Tensor) -> Tensor:
         X = F.pad(X, self.padding)
         X = F.unfold(X, kernel_size=self.local_size)
         return X
 
 
 def campos_to_R_T(
-    campos,
-    theta,
+    campos: Tensor,
+    theta: Tensor,
     device="cpu",
     at=((0, 0, 0),),
     up=((0, 1, 0),),
     extra_trans=None,
-):
+) -> tuple[Tensor, Tensor]:
     R = look_at_rotation(campos, at=at, device=device, up=up)  # (n, 3, 3)
     R = torch.bmm(R, rotation_theta(theta, device_=device))
     if extra_trans is not None:
@@ -83,7 +90,7 @@ def campos_to_R_T(
     return R, T
 
 
-def rotation_theta(theta, device_=None):
+def rotation_theta(theta: Tensor, device_=None) -> Tensor:
     # cos -sin  0
     # sin  cos  0
     # 0    0    1
@@ -113,12 +120,12 @@ def rotation_theta(theta, device_=None):
     return trans
 
 
-def pre_process_mesh_pascal(verts):
+def pre_process_mesh_pascal(verts: Tensor) -> Tensor:
     verts = torch.cat((verts[..., 0:1], verts[..., 2:3], -verts[..., 1:2]), dim=-1)
     return verts
 
 
-def set_bary_coords_to_nearest(bary_coords_):
+def set_bary_coords_to_nearest(bary_coords_: Tensor) -> Tensor:
     ori_shape = bary_coords_.shape
     exr = bary_coords_ * (bary_coords_ < 0)
     bary_coords_ = bary_coords_.view(-1, bary_coords_.shape[-1])
@@ -131,7 +138,9 @@ def set_bary_coords_to_nearest(bary_coords_):
     )
 
 
-def get_cube_proj(C, theta_gd, inter_module):
+def get_cube_proj(
+    C: Tensor, theta_gd: Tensor, inter_module: "MeshInterpolateModule"
+) -> tuple[Tensor, Tensor, Tensor]:
     projected_map = inter_module(C, theta_gd)
     box_obj = bbt.nonzero(projected_map)
 
@@ -141,7 +150,9 @@ def get_cube_proj(C, theta_gd, inter_module):
     return projected_map, object_height, object_width
 
 
-def camera_position_to_spherical_angle(camera_pose):
+def camera_position_to_spherical_angle(
+    camera_pose: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
     distance_o = torch.sum(camera_pose**2, dim=1) ** 0.5
     azimuth_o = torch.atan(
         camera_pose[:, 0] / camera_pose[:, 2]
@@ -152,7 +163,9 @@ def camera_position_to_spherical_angle(camera_pose):
     return distance_o, elevation_o, azimuth_o
 
 
-def get_transformation_matrix(azimuth, elevation, distance):
+def get_transformation_matrix(
+    azimuth: Tensor, elevation: Tensor, distance: Tensor
+) -> Tensor:
     distance[distance == 0] = 0.1
     # camera center
     C = torch.zeros((azimuth.shape[0], 3), device=azimuth.device)
@@ -184,7 +197,9 @@ def get_transformation_matrix(azimuth, elevation, distance):
     return R
 
 
-def cal_rotation_matrix(theta, elev, azim, dis):
+def cal_rotation_matrix(
+    theta: Tensor, elev: Tensor, azim: Tensor, dis: Tensor
+) -> Tensor:
     dis[dis <= 1e-10] = 0.5
     return (
         rotation_theta(theta) @ get_transformation_matrix(azim, elev, dis)[:, 0:3, 0:3]

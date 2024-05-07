@@ -88,7 +88,7 @@ def setup_training(cfg: DictConfig):
     )
 
 
-def setup_task(trainer, dataset, cfg):
+def setup_task(trainer, dataset, cfg: DictConfig):
     # Setup Dataset Objects
     dataset.setup_task()
     if cfg.dataset.name == "Pascal3D":

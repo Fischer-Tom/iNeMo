@@ -36,7 +36,7 @@ class FeatureExtractor(nn.Module):
         model_cfg = deepcopy(cfg)
         del model_cfg.mesh
         self.cfg = flatten_config(model_cfg)
-        self.net = torch.compile(resnetext(self.cfg), mode="reduce-overhead")
+        self.net = resnetext(self.cfg)
         self.out_layer = nn.Linear(
             self.cfg.extractor_dim,
             self.cfg.mesh_dim,

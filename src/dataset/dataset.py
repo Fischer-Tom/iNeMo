@@ -36,7 +36,7 @@ class IncrementalDataset(Dataset):
     exemplars_per_class: int = 0
     files_per_class: list
 
-    def __init__(self, cfg: DatasetCfg, for_test=False):
+    def __init__(self, cfg: DatasetCfg, for_test=False) -> None:
         self.cfg = deepcopy(cfg)
         self.cfg.for_test = for_test
         self.cfg.root_path = (
@@ -45,7 +45,7 @@ class IncrementalDataset(Dataset):
         split = "test" if for_test else "train"
         self._dtd = DTD(self.cfg.paths.dtd_path, split=split)
 
-    def next_task_classes(self):
+    def next_task_classes(self) -> ListConfig[str]:
         class_increment = len(self.cfg.classes) // self.cfg.n_tasks
         start_index = (
             0
@@ -56,34 +56,34 @@ class IncrementalDataset(Dataset):
         self.cfg.seen_classes = self.cfg.classes[: start_index + class_increment]
         return task_categories
 
-    def setup_task(self):
+    def setup_task(self) -> None:
         raise NotImplementedError("Must implement setup_task")
 
-    def __getitem__(self, item):
+    def __getitem__(self, item: int) -> dict:
         raise NotImplementedError("Must implement __getitem__")
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self._len_task + self._len_replay
 
     @property
-    def _len_task(self):
+    def _len_task(self) -> int:
         return len(self.file_list)
 
     @property
-    def _len_replay(self):
+    def _len_replay(self) -> int:
         return len(self.memory)
 
     @property
-    def seen_classes(self):
+    def seen_classes(self) -> ListConfig[str]:
         return self.cfg.seen_classes
 
-    def build_replay_memory(self):
+    def build_replay_memory(self) -> None:
         exemplars_per_class = self.cfg.memory_budget // len(self.cfg.seen_classes)
         self._reduce_exemplars(exemplars_per_class)
         self.exemplars_per_class = exemplars_per_class
         self.memory += self._build_exemplars()
 
-    def _reduce_exemplars(self, new_exemplars_per_class):
+    def _reduce_exemplars(self, new_exemplars_per_class: int) -> list[dict] | None:
         if self._len_replay == 0:
             return
         old_classes = len(self.cfg.seen_classes) - len(self.cfg.classes)
@@ -145,7 +145,7 @@ class IncrementalDataset(Dataset):
             start += self.exemplars_per_class
         return exemplars
 
-    def _build_exemplars(self):
+    def _build_exemplars(self) -> list[dict]:
         exemplars = []
         start = 0
         for i, n_files in enumerate(self.files_per_class):

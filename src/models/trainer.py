@@ -10,6 +10,7 @@ from tqdm import tqdm
 from torch.utils.data import default_collate
 import torch.nn.functional as F
 import wandb
+from torch import tensor as Tensor
 
 from src.lib.inference_utils import cal_pose_err, get_init_pose, loss_fun, pre_render
 from src.lib.mesh_utils import (
@@ -20,11 +21,22 @@ from src.lib.mesh_utils import (
 from src.lib.renderer import MeshInterpolateModule
 
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torch.optim import Optimizer
+    from torch.utils.data import DataLoader
+    from omegaconf import DictConfig
+    from src.models.memory import MeshMemory
+    from src.lib.renderer import RenderEngine
+    from torch.nn import Module
+
+
 @dataclass
 class TrainerCfg:
-    pad_index: torch.tensor
-    xverts: list[torch.tensor]
-    xfaces: list[torch.tensor]
+    pad_index: Tensor
+    xverts: list[Tensor]
+    xfaces: list[Tensor]
     n_classes: int
     weight_noise: float
     eps: float = 1e-5
@@ -56,11 +68,20 @@ class ParamCfg:
 class BaseTrainer:
     cfg: TrainerCfg
     inf_cfg: ValidationCfg
-    current_pad_index: torch.tensor
+    current_pad_index: Tensor
     n_classes: int = None
     current_task_id: int = 0
 
-    def __init__(self, net, memory, renderer, criterion, train_cfg, param_cfg, inf_cfg):
+    def __init__(
+        self,
+        net: "Module",
+        memory: "MeshMemory",
+        renderer: "RenderEngine",
+        criterion: "Module",
+        train_cfg: "DictConfig",
+        param_cfg: "DictConfig",
+        inf_cfg: "DictConfig",
+    ) -> None:
         self.net = net
         self.old_net = None
         self.mesh_memory = memory
@@ -71,18 +92,18 @@ class BaseTrainer:
         self.param_cfg = ParamCfg(**param_cfg)
         self.inf_cfg = ValidationCfg(**inf_cfg)
 
-    def set_optimizer(self, optim):
+    def set_optimizer(self, optim: "Module") -> None:
         self.optimizer = optim
 
-    def lr_update(self, epoch, cfg):
+    def lr_update(self, epoch: int, cfg: "DictConfig") -> None:
         if (epoch - 1) % cfg.update_lr_epoch_n == 0:
             lr = cfg.lr * cfg.update_lr_
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
 
-    def set_current_pad_index(self, n_seen_classes):
+    def set_current_pad_index(self, n_seen_classes: int) -> None:
         self.current_task_id += 1
-        self.current_pad_index = torch.tensor(
+        self.current_pad_index = Tensor(
             [
                 vertex
                 for vertices in self.cfg.pad_index[:n_seen_classes]
@@ -95,13 +116,15 @@ class BaseTrainer:
         )
         self.n_classes = n_seen_classes
 
-    def set_old_net(self):
+    def set_old_net(self) -> None:
         if self.param_cfg.kd_reg > 0:
             self.old_net = deepcopy(self.net)
             self.old_net.requires_grad_(False)
             self.old_net.train()
 
-    def _to_device(self, sample, device="cuda"):
+    def _to_device(
+        self, sample: Tensor, device="cuda"
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         # TODO: Account for multi-gpu
         img, img_label, pose = (
             sample["img"].to(device),
@@ -114,7 +137,7 @@ class BaseTrainer:
         )
         return img, img_label, idx, pose
 
-    def train_epoch(self, loader):
+    def train_epoch(self, loader: "DataLoader") -> None:
         self.net.train()
 
         with tqdm(loader, unit="batch") as tepoch:
@@ -127,11 +150,9 @@ class BaseTrainer:
                     nemo_loss=loss, kd_loss=loss_kd, pos_reg_loss=loss_pos_reg
                 )
 
-    def validate(self, loader, run_pe=False):
+    def validate(self, loader: "DataLoader", run_pe=False) -> None:
         self.net.eval()
-        class_preds, class_gds, pose_errors = [
-            torch.tensor([], dtype=torch.float32)
-        ] * 3
+        class_preds, class_gds, pose_errors = [Tensor([], dtype=torch.float32)] * 3
 
         compare_bank = rearrange(
             self.mesh_memory.memory[: self.n_classes], "b c v -> b v c"
@@ -194,7 +215,7 @@ class BaseTrainer:
         )
 
     @torch.no_grad()
-    def fill_background_model(self, replay_memory):
+    def fill_background_model(self, replay_memory: list[dict]) -> None:
         bank_size = self.mesh_memory.cfg.bank_size
         n_iter = max(0, bank_size // len(replay_memory))
         for _ in range(n_iter):
@@ -208,7 +229,9 @@ class BaseTrainer:
                     features, kpvis, label, updateVertices=False
                 )
 
-    def _train_step(self, img, label, idx, pose):
+    def _train_step(
+        self, img: Tensor, label: Tensor, idx: Tensor, pose: Tensor
+    ) -> tuple[float, float, float]:
         keypoint, kpvis, mask, projection = self._annotate(pose, label)
         features = self.net(img, kp=keypoint, mask=1 - mask)
 
@@ -225,8 +248,8 @@ class BaseTrainer:
         )
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
 
-        loss_pos_reg = torch.tensor(0.0, device=img.device)
-        loss_kd = torch.tensor(0.0, device=img.device)
+        loss_pos_reg = Tensor(0.0, device=img.device)
+        loss_kd = Tensor(0.0, device=img.device)
 
         if self.param_cfg.pos_reg > 0.0 and self.mesh_memory.ETF is not None:
             class_reg, reg_labels = self.mesh_memory.class_contrastive(features, label)
@@ -248,7 +271,9 @@ class BaseTrainer:
 
         return loss.item(), loss_pos_reg.item(), loss_kd.item()
 
-    def _annotate(self, pose, label):
+    def _annotate(
+        self, pose: Tensor, label: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         annotations = self.renderer.get_annotations(
             rearrange(self.mesh_memory.memory, "b c v -> b v c"),
             pose,
@@ -259,7 +284,14 @@ class BaseTrainer:
         )
         return annotations
 
-    def _kd_loss(self, img, keypoints, mask, kpvis, new_feats):
+    def _kd_loss(
+        self,
+        img: Tensor,
+        keypoints: Tensor,
+        mask: Tensor,
+        kpvis: Tensor,
+        new_feats: Tensor,
+    ) -> Tensor:
 
         old_feats = self.old_net(img, kp=keypoints, mask=1 - mask)
         old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
@@ -277,7 +309,7 @@ class BaseTrainer:
         return kd_loss
 
     @torch.no_grad()
-    def _remove_neighbors(self, keypoints, img_label):
+    def _remove_neighbors(self, keypoints: Tensor, img_label: Tensor) -> Tensor:
         zeros = torch.zeros(
             keypoints.shape[0],
             self.mesh_memory.cfg.max_n,
@@ -328,7 +360,9 @@ class BaseTrainer:
             )
 
     @torch.no_grad()
-    def _classify(self, compare_bank, pred_features, clutter_score):
+    def _classify(
+        self, compare_bank: Tensor, pred_features: Tensor, clutter_score: Tensor
+    ) -> Tensor:
         flat_features = rearrange(pred_features, "b c h w -> b c (h w)")
         score_per_pixel = einsum(compare_bank, flat_features, "n v c, b c p -> b n v p")
         max_cl = torch.max(clutter_score, dim=1, keepdim=True).values
@@ -340,7 +374,9 @@ class BaseTrainer:
         return torch.argmax(score, dim=1).flatten().cpu().detach()
 
     @torch.no_grad()
-    def _pre_render(self, compare_bank):
+    def _pre_render(
+        self, compare_bank: Tensor
+    ) -> tuple[Tensor, list[tuple[float, float, float]]]:
         azum_s = np.linspace(0, np.pi * 2, 12, endpoint=False, dtype=np.float32)
         elev_s = np.linspace(-np.pi / 6, np.pi / 3, 4, dtype=np.float32)
         theta_s = np.linspace(-np.pi / 6, np.pi / 6, 3, dtype=np.float32)
@@ -351,8 +387,14 @@ class BaseTrainer:
         return pre_rendered_maps, c_poses
 
     def _pose_estimation(
-        self, pred_features, compare_bank, cls_pred, C, theta, pose_gd
-    ):
+        self,
+        pred_features: Tensor,
+        compare_bank: Tensor,
+        cls_pred: Tensor,
+        C: Tensor,
+        theta: Tensor,
+        pose_gd: Tensor,
+    ) -> Tensor:
         errors = []
         for b, pred in enumerate(pred_features):
             C_i = torch.nn.Parameter(C[b : b + 1], requires_grad=True)
@@ -394,9 +436,11 @@ class BaseTrainer:
                 np.array(pred_matrix[0].cpu(), dtype=np.float64),
             )
             errors.append(error)
-        return torch.tensor(errors)
+        return Tensor(errors)
 
-    def _regress_pose(self, predicted_features, C, theta, render_module):
+    def _regress_pose(
+        self, predicted_features: Tensor, C: Tensor, theta: Tensor, render_module
+    ) -> Tensor:
         projected_map, obj_height, obj_width = get_cube_proj(C, theta, render_module)
         projected_map = projected_map[
             ...,

@@ -78,7 +78,7 @@ class BaseTrainer:
         memory: "MeshMemory",
         renderer: "RenderEngine",
         criterion: "Module",
-        train_cfg: "DictConfig",
+        train_cfg: dict,
         param_cfg: "DictConfig",
         inf_cfg: "DictConfig",
     ) -> None:
@@ -92,7 +92,7 @@ class BaseTrainer:
         self.param_cfg = ParamCfg(**param_cfg)
         self.inf_cfg = ValidationCfg(**inf_cfg)
 
-    def set_optimizer(self, optim: "Module") -> None:
+    def set_optimizer(self, optim: "Optimizer") -> None:
         self.optimizer = optim
 
     def lr_update(self, epoch: int, cfg: "DictConfig") -> None:

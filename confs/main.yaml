@@ -14,7 +14,9 @@ seed: 101010
 
 mode: train
 
+
 checkpointing:
+  log_dir: ~
   load_path: ~
   save_path: ~
 

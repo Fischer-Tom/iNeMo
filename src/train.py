@@ -161,11 +161,15 @@ def train(trainer, dataset, cfg):
 
 @hydra.main(version_base="1.3", config_path="../confs", config_name="main")
 def main(cfg: DictConfig) -> None:
+    cfg.checkpointing.log_dir = (
+        hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    )
     run = wandb.init(
         project=cfg.wandb.project,
         notes=cfg.wandb.notes,
         config=dict(cfg.nemo.train),
         mode=cfg.wandb.mode,
+        dir=cfg.checkpointing.log_dir,
     )
     train_vars = setup_training(cfg)
     train(*train_vars, cfg)

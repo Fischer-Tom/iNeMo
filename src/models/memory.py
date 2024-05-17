@@ -172,7 +172,7 @@ class MeshMemory(nn.Module):
         self.lru += 1
         self.lru = self.lru % (self.cfg.bank_size // clutter.shape[0])
 
-        self.clutter_bank = F.normalize(
+        self.clutter_bank = self.l2_norm(
             torch.cat(
                 [
                     self.clutter_bank[
@@ -186,7 +186,6 @@ class MeshMemory(nn.Module):
                 dim=1,
             ),
             dim=0,
-            p=2,
         )
 
     def class_contrastive(self, features, img_label):

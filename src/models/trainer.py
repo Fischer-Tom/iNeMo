@@ -39,7 +39,7 @@ class TrainerCfg:
     xfaces: list[Tensor]
     n_classes: int
     weight_noise: float
-    eps: float = 1e-5
+    eps: float = 1e5
     noise_loss_weight: float = 0.1
     n_gpus: int = 1
 
@@ -137,18 +137,14 @@ class BaseTrainer:
         )
         return img, img_label, idx, pose
 
-    def train_epoch(self, loader: "DataLoader") -> None:
+    def train_epoch(self, loader: "DataLoader") -> float:
         self.net.train()
-
-        with tqdm(loader, unit="batch") as tepoch:
-            for i, sample in enumerate(tepoch):
-                img, label, idx, pose = self._to_device(sample)
-
-                loss, loss_pos_reg, loss_kd = self._train_step(img, label, idx, pose)
-
-                tepoch.set_postfix(
-                    nemo_loss=loss, kd_loss=loss_kd, pos_reg_loss=loss_pos_reg
-                )
+        running_loss = 0.0
+        for i, sample in enumerate(loader):
+            img, label, idx, pose = self._to_device(sample)
+            loss, loss_pos_reg, loss_kd = self._train_step(img, label, idx, pose)
+            running_loss += loss
+        return running_loss / len(loader)
 
     def validate(self, loader: "DataLoader", run_pe=False) -> None:
         self.net.eval()
@@ -242,6 +238,7 @@ class BaseTrainer:
         features = self.net(img, kp=keypoint, mask=1 - mask)
 
         similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
+        similarity *= self.param_cfg.kappa_main
         neighborhood_mask = self._remove_neighbors(keypoint, label)
         masked_similarity = similarity - neighborhood_mask
 
@@ -251,7 +248,7 @@ class BaseTrainer:
 
         nemo_loss = self.criterion(
             # self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis]
-            masked_similarity[kpvis, :] / 0.07,
+            masked_similarity[kpvis, :],
             idx[kpvis],
         )
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
@@ -467,3 +464,19 @@ class BaseTrainer:
         )
         clutter_score = torch.max(clutter_score, dim=0).values
         return loss_fun(object_score, clutter_score)
+
+    def visualize_samples(self, loader: "DataLoader") -> None:
+        from src.tools.visualize import convert_to, visualize_keypoints
+        import matplotlib.pyplot as plt
+
+        for i, sample in enumerate(loader):
+            img, label, idx, pose = self._to_device(sample)
+            keypoint, kpvis, mask, projection = self._annotate(pose, label)
+            img_pil = visualize_keypoints(
+                img[0].cpu(),
+                keypoint[0, :, [1, 0]].cpu().numpy() * 8,
+                kpvis[0].cpu().numpy(),
+            )
+
+            plt.imshow(img_pil)
+            plt.show()

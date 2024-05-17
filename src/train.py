@@ -5,6 +5,7 @@ import hydra
 import torch
 from omegaconf import DictConfig
 import wandb
+from tqdm import tqdm
 
 from src.lib.mesh_utils import load_off
 from src.lib.renderer import RenderEngine
@@ -142,9 +143,12 @@ def train(trainer, dataset, cfg):
             if n == 0
             else cfg.nemo.incremental.subsequent_increment_epoch
         )
-        for epoch in range(n_epochs):
-            trainer.lr_update(epoch, cfg=cfg.optimizer)
-            trainer.train_epoch(train_loader)
+        with tqdm(range(n_epochs), unit="batch") as tepochs:
+            for epoch in tepochs:
+                # trainer.visualize_samples(train_loader)
+                trainer.lr_update(epoch, cfg=cfg.optimizer)
+                loss = trainer.train_epoch(train_loader)
+                tepochs.set_description(f"Task: {n}, Epoch={epoch}, Loss={loss:.4f}")
 
         # Fill Replay Memory
         dataset.build_replay_memory()

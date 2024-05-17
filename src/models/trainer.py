@@ -198,13 +198,19 @@ class BaseTrainer:
                     pose_acc_pi6 = 0.0
                     pose_acc_pi18 = 0.0
                 accuracy = torch.mean((class_gds == class_preds).float()).item()
-
+                print(accuracy, pose_acc_pi6, pose_acc_pi18)
                 tepoch.set_postfix(
                     mode="val",
                     acc=accuracy,
                     pi6=pose_acc_pi6,
                     pi18=pose_acc_pi18,
                 )
+
+        print(
+            f"Validation Accuracy: {accuracy}, "
+            f"Validation Pose Error (pi/6): {pose_acc_pi6}, "
+            f"Validation Pose Error (pi/18): {pose_acc_pi18}"
+        )
         wandb.log(
             {
                 "Validation Accuracy": accuracy,

@@ -128,7 +128,6 @@ class MeshMemory(nn.Module):
             )
         if updateClutter:
             self.updateClutter(features[:, self.cfg.max_n : :, :])
-        # out.shape: [d, self.num_noise + n_pos]
         return (
             similarity,
             noise_similarity,

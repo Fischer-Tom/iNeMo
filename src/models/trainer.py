@@ -216,6 +216,7 @@ class BaseTrainer:
 
     @torch.no_grad()
     def fill_background_model(self, replay_memory: list[dict]) -> None:
+        self.net.eval()
         bank_size = self.mesh_memory.cfg.bank_size
         n_iter = max(0, bank_size // len(replay_memory))
         for _ in range(n_iter):
@@ -223,7 +224,7 @@ class BaseTrainer:
                 sample = default_collate([sample])
                 img, label, idx, pose = self._to_device(sample)
                 keypoint, kpvis, mask, projection = self._annotate(pose, label)
-                features = self.net(img, kp=keypoint, mask=mask)
+                features = self.net(img, kp=keypoint, mask=1 - mask)
 
                 _, _ = self.mesh_memory.forward(
                     features, kpvis, label, updateVertices=False
@@ -244,7 +245,9 @@ class BaseTrainer:
         idx = rearrange(idx, "b c -> (b c)")
 
         nemo_loss = self.criterion(
-            self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis]
+            # self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis]
+            masked_similarity[kpvis, :] / 0.07,
+            idx[kpvis],
         )
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
 

@@ -1,16 +1,7 @@
-from copy import deepcopy
-from os.path import join
-
 import hydra
 import torch
 from omegaconf import DictConfig
 import wandb
-
-from src.lib.mesh_utils import load_off
-from src.lib.renderer import RenderEngine
-from src.models.memory import MeshMemory
-from src.models.model import FeatureExtractor
-from src.models.trainer import BaseTrainer
 
 
 def setup_training(cfg: DictConfig):
@@ -156,12 +147,7 @@ def train(trainer, dataset, cfg):
         trainer.validate(test_loader, run_pe=False)
 
         # Save Model and Config
-        save_dict = {
-            "net": deepcopy(trainer.net.state_dict()),
-            "mesh_memory": deepcopy(trainer.mesh_memory.memory),
-            "clutter_bank": deepcopy(trainer.mesh_memory.clutter_bank),
-        }
-        torch.save(save_dict, join(cfg.checkpointing.log_dir, f"model_task_{n}.pt"))
+        # TODO: Add Model Saving
 
 
 @hydra.main(version_base="1.3", config_path="../confs", config_name="main")
@@ -169,17 +155,8 @@ def main(cfg: DictConfig) -> None:
     cfg.checkpointing.log_dir = (
         hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     )
-    run = wandb.init(
-        project=cfg.wandb.project,
-        notes=cfg.wandb.notes,
-        config=dict(cfg.nemo.train),
-        mode=cfg.wandb.mode,
-        dir=cfg.checkpointing.log_dir,
-    )
     train_vars = setup_training(cfg)
     train(*train_vars, cfg)
-    cfg.save(join(cfg.checkpointing.log_dir, f"config.yaml"))
-    run.finish()
 
 
 if __name__ == "__main__":

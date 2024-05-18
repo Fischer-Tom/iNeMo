@@ -182,7 +182,7 @@ def main(cfg: DictConfig) -> None:
     )
     train_vars = setup_training(cfg)
     train(*train_vars, cfg)
-    cfg.save(join(cfg.checkpointing.log_dir, f"config.yaml"))
+    # cfg.save(join(cfg.checkpointing.log_dir, f"config.yaml"))
     run.finish()
 
 

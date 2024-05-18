@@ -46,6 +46,8 @@ class IncrementalDataset(Dataset):
         self._dtd = DTD(self.cfg.paths.dtd_path, split=split)
 
     def next_task_classes(self) -> ListConfig[str]:
+        if self.cfg.for_test:
+            return self.cfg.seen_classes
         class_increment = len(self.cfg.classes) // self.cfg.n_tasks
         start_index = (
             0

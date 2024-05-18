@@ -41,7 +41,7 @@ def batched_index_select(t: Tensor, dim: int, inds: Tensor) -> Tensor:
 
 def keypoints_to_pixel_index(keypoints: Tensor, img_size: tuple) -> Tensor:
     line_size = img_size[1]
-    return (keypoints[:, :, 0] * line_size + keypoints[:, :, 1]).clamp(
+    return (keypoints[:, :, 0] // 1 * line_size + keypoints[:, :, 1] // 1).clamp(
         min=0, max=img_size[0] * img_size[1] - 1
     )
 

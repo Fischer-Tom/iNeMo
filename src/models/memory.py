@@ -149,18 +149,17 @@ class MeshMemory(nn.Module):
             ),
         )
 
-        visible_kp = visible_kp.view(visible_kp.shape[0], -1, vertices.shape[-1])
+        visible_kp = visible_kp.view(
+            visible_kp.shape[0], -1, vertices.shape[-1]
+        ).permute(0, 2, 1)
         # handle 0 in get, case that no img of one class is in the batch
         tmp = (count_label == 0).nonzero(as_tuple=True)[0]
         for i in tmp:
             # copy memory to get
-            visible_kp[i] = rearrange(self.memory, "b c v -> (b v) c")[
-                i * self.cfg.max_n : (i + 1) * self.cfg.max_n
-            ]
+            visible_kp[i] = self.memory[i]
 
         self.memory = self.l2_norm(
-            self.memory * self.cfg.momentum
-            + visible_kp.permute(0, 2, 1) * (1 - self.cfg.momentum),
+            self.memory * self.cfg.momentum + visible_kp * (1 - self.cfg.momentum),
             1,
         )
 

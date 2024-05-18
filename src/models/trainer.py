@@ -238,7 +238,6 @@ class BaseTrainer:
         features = self.net(img, kp=keypoint, mask=1 - mask)
 
         similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
-        similarity *= self.param_cfg.kappa_main
         neighborhood_mask = self._remove_neighbors(keypoint, label)
         masked_similarity = similarity - neighborhood_mask
 
@@ -247,8 +246,7 @@ class BaseTrainer:
         idx = rearrange(idx, "b c -> (b c)")
 
         nemo_loss = self.criterion(
-            # self.param_cfg.kappa_main * masked_similarity[kpvis, :], idx[kpvis]
-            masked_similarity[kpvis, :],
+            self.param_cfg.kappa_main * masked_similarity[kpvis, :],
             idx[kpvis],
         )
         noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight

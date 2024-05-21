@@ -1,198 +1,159 @@
-import itertools
-import math
-from dataclasses import dataclass
-from copy import deepcopy
-
-import numpy as np
 import torch
-from einops import einsum, rearrange
+from einops import rearrange
+from os.path import join
 from tqdm import tqdm
 from torch.utils.data import default_collate
-import torch.nn.functional as F
 import wandb
 from torch import tensor as Tensor
-
-from src.lib.inference_utils import cal_pose_err, get_init_pose, loss_fun, pre_render
-from src.lib.mesh_utils import (
-    cal_rotation_matrix,
-    camera_position_to_spherical_angle,
-    get_cube_proj,
-)
-from src.lib.renderer import MeshInterpolateModule
-
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from torch.optim import Optimizer
     from torch.utils.data import DataLoader
     from omegaconf import DictConfig
-    from src.models.memory import MeshMemory
-    from src.lib.renderer import RenderEngine
     from torch.nn import Module
 
 
-@dataclass
-class TrainerCfg:
-    pad_index: Tensor
-    xverts: list[Tensor]
-    xfaces: list[Tensor]
-    n_classes: int
-    weight_noise: float
-    eps: float = 1e5
-    noise_loss_weight: float = 0.1
-    n_gpus: int = 1
-
-
-@dataclass
-class ValidationCfg:
-    inf_epochs: int = 30
-    inf_bs: int = 8
-    inf_lr: float = 5e-2
-    inf_adam_beta_0: float = 0.4
-    inf_adam_beta_1: float = 0.6
-    inf_adam_eps: float = 1e-8
-    inf_adam_weight_decay: float = 0.0
-
-
-@dataclass
-class ParamCfg:
-    pos_reg: float
-    kd_reg: float
-    kappa_main: float
-    kappa_kd: float
-    kappa_pos: float
-    freeze_first_n_epochs: int
-
-
 class BaseTrainer:
-    cfg: TrainerCfg
-    inf_cfg: ValidationCfg
     current_pad_index: Tensor
     n_classes: int = None
     current_task_id: int = 0
 
     def __init__(
         self,
-        net: "Module",
-        memory: "MeshMemory",
-        renderer: "RenderEngine",
+        model: "Module",
         criterion: "Module",
-        train_cfg: dict,
-        param_cfg: "DictConfig",
-        inf_cfg: "DictConfig",
+        cfg: "DictConfig",
     ) -> None:
-        self.net = net
-        self.old_net = None
-        self.mesh_memory = memory
-        self.renderer = renderer
+        self.model = model
         self.criterion = criterion
         self.optimizer = None
-        self.cfg = TrainerCfg(**train_cfg)
-        self.param_cfg = ParamCfg(**param_cfg)
-        self.inf_cfg = ValidationCfg(**inf_cfg)
+        self.cfg = cfg
 
-    def set_optimizer(self, optim: "Optimizer") -> None:
-        self.optimizer = optim
-
-    def lr_update(self, epoch: int, cfg: "DictConfig") -> None:
+    def _lr_update(self, epoch: int, cfg: "DictConfig") -> None:
         if (epoch - 1) % cfg.update_lr_epoch_n == 0:
             lr = cfg.lr * cfg.update_lr_
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
 
-    def set_current_pad_index(self, n_seen_classes: int) -> None:
-        self.current_task_id += 1
-        self.current_pad_index = Tensor(
-            [
-                vertex
-                for vertices in self.cfg.pad_index[:n_seen_classes]
-                for vertex in vertices
-            ],
-            dtype=torch.long,
-        )
-        self.n_prev_classes = (
-            0 if self.n_classes is None else n_seen_classes - self.n_classes
-        )
-        self.n_classes = n_seen_classes
+    def train_incremental(self, dataset, cfg: "DictConfig") -> None:
+        for n in range(dataset.cfg.n_tasks):
+            train_loader, test_loader = self._setup_task(dataset, cfg)
+            if n > 0:
+                self.model.module.set_old_net()
+            n_epochs = (
+                cfg.nemo.incremental.increment_epoch
+                if n == 0
+                else cfg.nemo.incremental.subsequent_increment_epoch
+            )
+            with tqdm(range(n_epochs), unit="batch") as tepochs:
+                for epoch in tepochs:
+                    self._lr_update(epoch, cfg=cfg.optimizer)
+                    loss = self._train_epoch(train_loader)
+                    tepochs.set_description(
+                        f"Task: {n}, Epoch={epoch}, Loss={loss:.4f}"
+                    )
 
-    def set_old_net(self) -> None:
-        if self.param_cfg.kd_reg > 0:
-            self.old_net = deepcopy(self.net)
-            self.old_net.requires_grad_(False)
-            self.old_net.train()
+            # Fill Replay Memory
+            dataset.build_replay_memory()
 
-    def _to_device(
-        self, sample: Tensor, device="cuda"
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        # TODO: Account for multi-gpu
-        img, img_label, pose = (
-            sample["img"].to(device),
-            sample["label"].to(device),
-            sample["pose"].to(device),
-        )
-        idx = (
-            self.mesh_memory.cfg.max_n * img_label[:, None]
-            + torch.arange(0, self.mesh_memory.cfg.max_n, device=device)[None, :]
-        )
-        return img, img_label, idx, pose
+            # Even out Backround Model with Replay Memory
+            self.model.module.fill_background_model(dataset.memory)
 
-    def train_epoch(self, loader: "DataLoader") -> float:
-        self.net.train()
+            # Validate
+            self.validate(test_loader, run_pe=False)
+
+            # Save Model State
+            self.model.module.save_state(
+                join(self.cfg.checkpointing.log_dir, f"model_task_{n}.pt")
+            )
+
+    def _setup_task(self, dataset, cfg: "DictConfig"):
+        # Setup Dataset Objects
+        dataset.setup_task()
+        if cfg.dataset.name == "Pascal3D":
+            from src.dataset.p3d import Pascal3DPlus as ds
+        elif cfg.dataset.name == "ObjectNet3D":
+            from src.dataset.o3d import ObjectNet3D as ds
+        else:
+            raise NotImplementedError("Dataset not implemented")
+        val_dataset = ds(cfg=cfg.dataset, for_test=True)
+        val_dataset.cfg.seen_classes = dataset.cfg.seen_classes
+        val_dataset.setup_task()
+
+        # Setup Dataloaders
+        train_loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=cfg.data_loader.train.batch_size,
+            shuffle=True,
+            num_workers=cfg.data_loader.train.num_workers,
+            drop_last=True,
+            pin_memory=True,
+        )
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            batch_size=cfg.data_loader.test.batch_size,
+            shuffle=False,
+            num_workers=cfg.data_loader.test.num_workers,
+            pin_memory=True,
+        )
+
+        # Setup Optimizer
+        self.optimizer = torch.optim.Adam(
+            self.model.module.net.parameters(),
+            lr=cfg.optimizer.lr,
+            weight_decay=cfg.optimizer.weight_decay,
+        )
+
+        # Update trainer for the next task
+        self.model.module.set_current_pad_index(len(dataset.cfg.seen_classes))
+
+        return train_loader, val_loader
+
+    def _train_epoch(self, loader: "DataLoader") -> float:
+        self.model.train()
         running_loss = 0.0
         for i, sample in enumerate(loader):
-            img, label, idx, pose = self._to_device(sample)
-            loss, loss_pos_reg, loss_kd = self._train_step(img, label, idx, pose)
-            running_loss += loss
+            loss, loss_pos_reg, loss_kd = self.model(sample)
+
+            # Update Network
+            combined_loss = loss + loss_pos_reg + loss_kd
+            self.optimizer.zero_grad()
+            combined_loss.backward()
+            self.optimizer.step()
+
+            running_loss += loss.item()
         return running_loss / len(loader)
 
     def validate(self, loader: "DataLoader", run_pe=False) -> None:
-        self.net.eval()
+        self.model.eval()
         class_preds, class_gds, pose_errors = [Tensor([], dtype=torch.float32)] * 3
 
         compare_bank = rearrange(
-            self.mesh_memory.memory[: self.n_classes], "b c v -> b v c"
+            self.model.module.mesh_memory.memory[: self.n_classes], "b c v -> b v c"
         )
         if run_pe:
-            pre_rendered_maps, pre_rendered_poses = self._pre_render(compare_bank)
+            pre_rendered_maps, pre_rendered_poses = self.model.module._pre_render(
+                compare_bank
+            )
+        else:
+            pre_rendered_maps, pre_rendered_poses = None, None
         with tqdm(loader, unit="batch") as tepoch:
             for i, sample in enumerate(tepoch):
-                img, label, idx, pose = self._to_device(sample)
-                pred_features = self.net(img)
-                clutter_score = rearrange(
-                    einsum(
-                        self.mesh_memory.clutter_bank,
-                        pred_features,
-                        "c k, b c h w -> b k h w",
-                    ),
-                    "b k h w -> b k (h w)",
+                cls_pred, label, pose_error = self.model.module.inference(
+                    sample,
+                    compare_bank,
+                    pre_rendered_maps,
+                    pre_rendered_poses,
+                    run_pe=run_pe,
                 )
-                cls_pred = self._classify(compare_bank, pred_features, clutter_score)
                 class_gds = torch.cat((class_gds, label.cpu()), dim=0)
-                class_preds = torch.cat((class_preds, cls_pred), dim=0)
+                class_preds = torch.cat((class_preds, cls_pred.cpu()), dim=0)
+                pose_errors = torch.cat((pose_errors, pose_error.cpu()), dim=0)
 
-                if run_pe:
-                    C, theta = get_init_pose(
-                        pre_rendered_poses,
-                        pre_rendered_maps[cls_pred],
-                        pred_features,
-                        clutter_score=clutter_score,
-                        device=img.device,
-                    )
-                    pose_error = self._pose_estimation(
-                        pred_features, compare_bank, cls_pred, C, theta, pose
-                    )
-                    pose_errors = torch.cat((pose_errors, pose_error), dim=0)
+                pose_acc_pi6 = torch.mean((pose_errors < torch.pi / 6).float()).item()
+                pose_acc_pi18 = torch.mean((pose_errors < torch.pi / 18).float()).item()
 
-                    pose_acc_pi6 = torch.mean(
-                        (pose_errors < torch.pi / 6).float()
-                    ).item()
-                    pose_acc_pi18 = torch.mean(
-                        (pose_errors < torch.pi / 18).float()
-                    ).item()
-                else:
-                    pose_acc_pi6 = 0.0
-                    pose_acc_pi18 = 0.0
                 accuracy = torch.mean((class_gds == class_preds).float()).item()
                 tepoch.set_postfix(
                     mode="val",
@@ -214,267 +175,3 @@ class BaseTrainer:
             },
             step=self.current_task_id,
         )
-
-    @torch.no_grad()
-    def fill_background_model(self, replay_memory: list[dict]) -> None:
-        self.net.eval()
-        bank_size = self.mesh_memory.cfg.bank_size
-        n_iter = max(0, bank_size // len(replay_memory))
-        for _ in range(n_iter):
-            for i, sample in enumerate(replay_memory):
-                sample = default_collate([sample])
-                img, label, idx, pose = self._to_device(sample)
-                keypoint, kpvis, mask, projection = self._annotate(pose, label)
-                features = self.net(img, kp=keypoint, mask=1 - mask)
-
-                _, _ = self.mesh_memory.forward(
-                    features, kpvis, label, updateVertices=False
-                )
-
-    def _train_step(
-        self, img: Tensor, label: Tensor, idx: Tensor, pose: Tensor
-    ) -> tuple[float, float, float]:
-        keypoint, kpvis, mask, projection = self._annotate(pose, label)
-        features = self.net(img, kp=keypoint, mask=1 - mask)
-
-        similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
-        neighborhood_mask = self._remove_neighbors(keypoint, label)
-        masked_similarity = similarity - neighborhood_mask
-
-        masked_similarity = rearrange(masked_similarity, "b c v -> (b c) v")
-        kpvis = rearrange(kpvis, "b c -> (b c)").type(torch.bool)
-        idx = rearrange(idx, "b c -> (b c)")
-
-        nemo_loss = self.criterion(
-            self.param_cfg.kappa_main * masked_similarity[kpvis, :],
-            idx[kpvis],
-        )
-        noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
-
-        loss_pos_reg = Tensor(0.0, device=img.device)
-        loss_kd = Tensor(0.0, device=img.device)
-
-        if self.param_cfg.pos_reg > 0.0 and self.mesh_memory.ETF is not None:
-            class_reg, reg_labels = self.mesh_memory.class_contrastive(features, label)
-            loss_pos_reg = self.criterion(
-                class_reg[kpvis, :],
-                reg_labels[kpvis],
-            )
-        if self.old_net is not None and self.param_cfg.kd_reg >= 0.0:
-            loss_kd = self._kd_loss(img, keypoint, mask, kpvis, features)
-        loss = nemo_loss + noise_loss
-        combined_loss = (
-            loss
-            + self.param_cfg.pos_reg * loss_pos_reg
-            + self.param_cfg.kd_reg * loss_kd
-        )
-        self.optimizer.zero_grad()
-        combined_loss.backward()
-        self.optimizer.step()
-
-        return loss.item(), loss_pos_reg.item(), loss_kd.item()
-
-    def _annotate(
-        self, pose: Tensor, label: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        annotations = self.renderer.get_annotations(
-            rearrange(self.mesh_memory.memory, "b c v -> b v c"),
-            pose,
-            label,
-            self.cfg.xverts,
-            self.cfg.xfaces,
-            label.device,
-        )
-        return annotations
-
-    def _kd_loss(
-        self,
-        img: Tensor,
-        keypoints: Tensor,
-        mask: Tensor,
-        kpvis: Tensor,
-        new_feats: Tensor,
-    ) -> Tensor:
-
-        old_feats = self.old_net(img, kp=keypoints, mask=1 - mask)
-        old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
-        new_similarity = self.mesh_memory.forward_kd(new_feats, self.n_prev_classes)
-
-        soft_targets = F.log_softmax(
-            self.param_cfg.kd_reg * old_similarity[kpvis, :], dim=-1
-        )
-        soft_probs = F.log_softmax(
-            self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
-        )
-        kd_loss = F.kl_div(
-            soft_probs, soft_targets, reduction="batchmean", log_target=True
-        )
-        return kd_loss
-
-    @torch.no_grad()
-    def _remove_neighbors(self, keypoints: Tensor, img_label: Tensor) -> Tensor:
-        zeros = torch.zeros(
-            keypoints.shape[0],
-            self.mesh_memory.cfg.max_n,
-            self.mesh_memory.cfg.max_n * self.mesh_memory.memory.shape[0],
-            device=keypoints.device,
-        )
-        distance = torch.sum(
-            (torch.unsqueeze(keypoints, dim=1) - torch.unsqueeze(keypoints, dim=2)).pow(
-                2,
-            ),
-            dim=3,
-        ).pow(0.5)
-        if self.mesh_memory.cfg.num_clutter == 0:
-            return (
-                (distance <= self.mesh_memory.cfg.distance_thr).type(torch.float32)
-                - torch.eye(keypoints.shape[1], device=distance.device).unsqueeze(dim=0)
-            ) * self.cfg.eps
-        else:
-            tem = (distance <= self.mesh_memory.cfg.distance_thr).type(
-                torch.float32
-            ) - torch.eye(keypoints.shape[1], device=distance.device).unsqueeze(dim=0)
-
-            for i in range(tem.shape[0]):
-                zeros[
-                    i,
-                    :,
-                    img_label[i] * tem.shape[1] : (img_label[i] + 1) * tem.shape[1],
-                ] = (
-                    tem[i] * self.cfg.eps
-                )
-            zeros[:, :, self.current_pad_index] = self.cfg.eps
-
-            return torch.cat(
-                [
-                    zeros,
-                    -torch.ones(
-                        keypoints.shape[0:2]
-                        + (
-                            self.mesh_memory.cfg.num_clutter
-                            * self.mesh_memory.cfg.bank_size,
-                        ),
-                        dtype=torch.float32,
-                        device=zeros.device,
-                    )
-                    * math.log(self.cfg.weight_noise),
-                ],
-                dim=2,
-            )
-
-    @torch.no_grad()
-    def _classify(
-        self, compare_bank: Tensor, pred_features: Tensor, clutter_score: Tensor
-    ) -> Tensor:
-        flat_features = rearrange(pred_features, "b c h w -> b c (h w)")
-        score_per_pixel = einsum(compare_bank, flat_features, "n v c, b c p -> b n v p")
-        max_cl = torch.max(clutter_score, dim=1, keepdim=True).values
-        max_score = torch.max(score_per_pixel, dim=2).values
-        max_2 = torch.topk(max_score, 2, dim=1).values
-        diff = 1 - (max_2[..., 0:1, :] - max_2[..., 1:2, :])
-        score = torch.max((max_score - max_cl - diff), dim=2).values
-
-        return torch.argmax(score, dim=1).flatten().cpu().detach()
-
-    @torch.no_grad()
-    def _pre_render(
-        self, compare_bank: Tensor
-    ) -> tuple[Tensor, list[tuple[float, float, float]]]:
-        azum_s = np.linspace(0, np.pi * 2, 12, endpoint=False, dtype=np.float32)
-        elev_s = np.linspace(-np.pi / 6, np.pi / 3, 4, dtype=np.float32)
-        theta_s = np.linspace(-np.pi / 6, np.pi / 6, 3, dtype=np.float32)
-        c_poses = list(itertools.product(azum_s, elev_s, theta_s))
-        pre_rendered_maps = pre_render(
-            c_poses, compare_bank, self.renderer, self.cfg.xverts, self.cfg.xfaces
-        )
-        return pre_rendered_maps, c_poses
-
-    def _pose_estimation(
-        self,
-        pred_features: Tensor,
-        compare_bank: Tensor,
-        cls_pred: Tensor,
-        C: Tensor,
-        theta: Tensor,
-        pose_gd: Tensor,
-    ) -> Tensor:
-        errors = []
-        for b, pred in enumerate(pred_features):
-            C_i = torch.nn.Parameter(C[b : b + 1], requires_grad=True)
-            theta_i = torch.nn.Parameter(theta[b : b + 1], requires_grad=True)
-
-            optim = torch.optim.Adam(
-                params=[C_i, theta_i],
-                lr=self.inf_cfg.inf_lr,
-                betas=(self.inf_cfg.inf_adam_beta_0, self.inf_cfg.inf_adam_beta_1),
-            )
-            xvert, xface = self.cfg.xverts[cls_pred[b]], self.cfg.xfaces[cls_pred[b]]
-            inter_module = MeshInterpolateModule(
-                xvert.cuda(),
-                xface.cuda(),
-                compare_bank[cls_pred[b]],
-                self.renderer.rasterizer,
-            )
-            inter_module = inter_module.cuda()
-
-            for epoch in range(self.inf_cfg.inf_epochs):
-                loss = self._regress_pose(pred, C_i, theta_i, inter_module)
-
-                optim.zero_grad()
-                loss.backward()
-                optim.step()
-            (
-                distance_pred,
-                elevation_pred,
-                azimuth_pred,
-            ) = camera_position_to_spherical_angle(C_i.clone().detach())
-            pred_matrix = cal_rotation_matrix(
-                theta_i.clone().detach(), elevation_pred, azimuth_pred, distance_pred
-            )
-            gd_matrix = cal_rotation_matrix(
-                pose_gd[:, 3], pose_gd[:, 1], pose_gd[:, 2], pose_gd[:, 0]
-            )
-            error = cal_pose_err(
-                np.array(gd_matrix[0].cpu(), dtype=np.float64),
-                np.array(pred_matrix[0].cpu(), dtype=np.float64),
-            )
-            errors.append(error)
-        return Tensor(errors)
-
-    def _regress_pose(
-        self, predicted_features: Tensor, C: Tensor, theta: Tensor, render_module
-    ) -> Tensor:
-        projected_map, obj_height, obj_width = get_cube_proj(C, theta, render_module)
-        projected_map = projected_map[
-            ...,
-            obj_height[0] : obj_height[1],
-            obj_width[0] : obj_width[1],
-        ].squeeze()
-        masked_features = predicted_features[
-            ...,
-            obj_height[0] : obj_height[1],
-            obj_width[0] : obj_width[1],
-        ]
-        object_score = torch.sum(projected_map * masked_features, dim=0)
-
-        clutter_score = einsum(
-            self.mesh_memory.clutter_bank, masked_features, "c v, c h w -> v h w"
-        )
-        clutter_score = torch.max(clutter_score, dim=0).values
-        return loss_fun(object_score, clutter_score)
-
-    def visualize_samples(self, loader: "DataLoader") -> None:
-        from src.tools.visualize import convert_to, visualize_keypoints
-        import matplotlib.pyplot as plt
-
-        for i, sample in enumerate(loader):
-            img, label, idx, pose = self._to_device(sample)
-            keypoint, kpvis, mask, projection = self._annotate(pose, label)
-            img_pil = visualize_keypoints(
-                img[0].cpu(),
-                keypoint[0, :, [1, 0]].cpu().numpy() * 8,
-                kpvis[0].cpu().numpy(),
-            )
-
-            plt.imshow(img_pil)
-            plt.show()

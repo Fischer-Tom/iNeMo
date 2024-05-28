@@ -61,7 +61,23 @@ class BaseTrainer:
             self.model.module.fill_background_model(dataset.memory)
 
             # Validate
-            self.validate(test_loader, run_pe=False)
+            accuracy, pose_acc_pi6, pose_acc_pi18 = self.validate(
+                test_loader, run_pe=False
+            )
+
+            print(
+                f"Validation Accuracy: {accuracy}, "
+                f"Validation Pose Error (pi/6): {pose_acc_pi6}, "
+                f"Validation Pose Error (pi/18): {pose_acc_pi18}"
+            )
+            wandb.log(
+                {
+                    "Validation Accuracy": accuracy,
+                    "Validation Pose Error (pi/6)": pose_acc_pi6,
+                    "Validation Pose Error (pi/18)": pose_acc_pi18,
+                },
+                step=self.current_task_id,
+            )
 
             # Save Model State
             self.model.module.save_state(
@@ -125,7 +141,9 @@ class BaseTrainer:
             running_loss += loss.item()
         return running_loss / len(loader)
 
-    def validate(self, loader: "DataLoader", run_pe=False) -> None:
+    def validate(
+        self, loader: "DataLoader", run_pe=False
+    ) -> tuple[float, float, float]:
         self.model.eval()
         class_preds, class_gds, pose_errors = [Tensor([], dtype=torch.float32)] * 3
 
@@ -162,16 +180,4 @@ class BaseTrainer:
                     pi18=pose_acc_pi18,
                 )
 
-        print(
-            f"Validation Accuracy: {accuracy}, "
-            f"Validation Pose Error (pi/6): {pose_acc_pi6}, "
-            f"Validation Pose Error (pi/18): {pose_acc_pi18}"
-        )
-        wandb.log(
-            {
-                "Validation Accuracy": accuracy,
-                "Validation Pose Error (pi/6)": pose_acc_pi6,
-                "Validation Pose Error (pi/18)": pose_acc_pi18,
-            },
-            step=self.current_task_id,
-        )
+        return accuracy, pose_acc_pi6, pose_acc_pi18

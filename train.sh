@@ -1,5 +1,5 @@
 #!/bin/bash
-source /home/fischer/.bashrc2
+source /home/fischer/.bashrc
 ROOT="/home/fischer/iNeMo/"
 
 cd $ROOT

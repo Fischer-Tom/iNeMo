@@ -22,7 +22,7 @@ incremental:
 
 train:
   pos_reg: 0.2
-  kd_reg: 10.0
+  kd_reg: 2.0
   freeze_first_n_epochs: 0
   kappa_main: 14.3
   kappa_kd: 0.5

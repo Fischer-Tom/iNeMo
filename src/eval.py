@@ -1,10 +1,20 @@
+from copy import deepcopy
+from os.path import join
+
+import argparse
 import hydra
 import torch
 from omegaconf import DictConfig
-import wandb
+
+from src.lib.mesh_utils import load_off
+from src.lib.renderer import RenderEngine
+from src.models.memory import MeshMemory
+from src.models.model import FeatureExtractor
+from src.models.inemo import iNeMo
+from src.models.trainer import BaseTrainer
 
 
-def setup_training(cfg: DictConfig):
+def setup_training(model_path: str, cfg: DictConfig):
     if cfg.dataset.name == "Pascal3D":
         from src.dataset.p3d import Pascal3DPlus as ds
     elif cfg.dataset.name == "ObjectNet3D":
@@ -32,19 +42,20 @@ def setup_training(cfg: DictConfig):
         pad_indexes.append(pad_index)
 
     # Setup Dataset and Dataloader related Variables
-    dataset = ds(cfg.dataset)
+    test_dataset = ds(cfg=cfg.dataset, for_test=True)
+    test_dataset.cfg.seen_classes = cfg.dataset.classes
+    test_dataset.setup_task()
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=cfg.data_loader.test.batch_size,
+        shuffle=False,
+        num_workers=cfg.data_loader.test.num_workers,
+        pin_memory=True,
+    )
 
     net = FeatureExtractor(cfg.model)
-    n_gpus = torch.cuda.device_count()
-    if torch.cuda.device_count() > 1:
-        net = torch.nn.DataParallel(
-            net.cuda(), device_ids=[i for i in range(n_gpus - 1)]
-        )
-    else:
-        net = torch.nn.DataParallel(net.cuda())
 
-    mesh_memory = MeshMemory(cfg.model).to("cuda")
-    mesh_memory.initialize_etf(cfg.dataset.etf_init)
+    mesh_memory = MeshMemory(cfg.model)
 
     # Setup training criterion
     criterion = torch.nn.CrossEntropyLoss(reduction="mean").cuda()
@@ -53,111 +64,60 @@ def setup_training(cfg: DictConfig):
     render_engine = RenderEngine(cfg)
 
     # Static Variables during training
+    n_gpus = torch.cuda.device_count()
     trainer_vars = {
         "pad_index": pad_indexes,
-        "n_gpus": n_gpus,
         "n_classes": all_classes,
         "xverts": xverts,
         "xfaces": xfaces,
         "weight_noise": cfg.model.weight_noise,
     }
 
-    # Setup Trainer
-    trainer = BaseTrainer(
-        net,
-        mesh_memory,
-        render_engine,
-        criterion,
+    # Setup iNeMo Model
+    model = iNeMo(
+        net=net,
+        memory=mesh_memory,
+        renderer=render_engine,
+        criterion=criterion,
         train_cfg=trainer_vars,
         param_cfg=cfg.nemo.train,
         inf_cfg=cfg.nemo.inference,
     )
+    model.load_state(model_path)
 
-    return (
-        trainer,
-        dataset,
-    )
-
-
-def setup_task(trainer, dataset, cfg: DictConfig):
-    # Setup Dataset Objects
-    dataset.setup_task()
-    if cfg.dataset.name == "Pascal3D":
-        from src.dataset.p3d import Pascal3DPlus as ds
-    elif cfg.dataset.name == "ObjectNet3D":
-        from src.dataset.o3d import ObjectNet3D as ds
-    else:
-        raise NotImplementedError("Dataset not implemented")
-    val_dataset = ds(cfg=cfg.dataset, for_test=True)
-    val_dataset.cfg.seen_classes = dataset.cfg.seen_classes
-    val_dataset.setup_task()
-
-    # Setup Dataloaders
-    train_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=cfg.data_loader.train.batch_size,
-        shuffle=True,
-        num_workers=cfg.data_loader.train.num_workers,
-        drop_last=True,
-        pin_memory=True,
-    )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=cfg.data_loader.test.batch_size,
-        shuffle=False,
-        num_workers=cfg.data_loader.test.num_workers,
-        pin_memory=True,
-    )
-
-    # Setup Optimizer
-    optim = torch.optim.Adam(
-        trainer.net.parameters(),
-        lr=cfg.optimizer.lr,
-        weight_decay=cfg.optimizer.weight_decay,
-    )
-
-    # Update trainer for the next task
-    trainer.set_optimizer(optim)
-    trainer.set_current_pad_index(len(dataset.cfg.seen_classes))
-
-    return train_loader, val_loader, optim
-
-
-def train(trainer, dataset, cfg):
-    for n in range(dataset.cfg.n_tasks):
-        train_loader, test_loader, optim = setup_task(trainer, dataset, cfg)
-        if n > 0:
-            trainer.set_old_net()
-        n_epochs = (
-            cfg.nemo.incremental.increment_epoch
-            if n == 0
-            else cfg.nemo.incremental.subsequent_increment_epoch
+    if n_gpus > 1:
+        model = torch.nn.DataParallel(
+            model.cuda(), device_ids=[i for i in range(n_gpus - 1)]
         )
-        for epoch in range(n_epochs):
-            trainer.lr_update(epoch, cfg=cfg.optimizer)
-            trainer.train_epoch(train_loader)
+    else:
+        model = torch.nn.DataParallel(model.cuda())
 
-        # Fill Replay Memory
-        dataset.build_replay_memory()
+    # Setup Trainer
+    trainer = BaseTrainer(
+        model=model,
+        criterion=criterion,
+        cfg=cfg,
+    )
 
-        # Even out Backround Model with Replay Memory
-        trainer.fill_background_model(dataset.memory)
-
-        # Validate
-        trainer.validate(test_loader, run_pe=False)
-
-        # Save Model and Config
-        # TODO: Add Model Saving
+    return (trainer, test_loader)
 
 
 @hydra.main(version_base="1.3", config_path="../confs", config_name="main")
 def main(cfg: DictConfig) -> None:
-    cfg.checkpointing.log_dir = (
-        hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+
+    parser = argparse.ArgumentParser(description="Evaluate iNeMo Model")
+    parser.add_argument(
+        "--ckpt_path",
+        default="/home/fischer/remote/iNeMo/outputs/2024-05-19/21-20-37/model_task_3.pt",
+        type=str,
     )
-    train_vars = setup_training(cfg)
-    train(*train_vars, cfg)
+    args = parser.parse_args()
+
+    # Setup and run training
+    trainer, test_loader = setup_training(args.ckpt_path, cfg)
+    trainer.validate(test_loader, run_pe=False)
 
 
 if __name__ == "__main__":
+
     main()

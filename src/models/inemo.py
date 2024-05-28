@@ -98,6 +98,20 @@ class iNeMo(nn.Module):
             self.old_net.requires_grad_(False)
             self.old_net.train()
 
+    def load_state(self, load_path: "Path") -> None:
+        checkpoint = torch.load(load_path)
+        from collections import OrderedDict
+
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint["net"].items():
+            name = k[7:]  # remove `module.`
+            new_state_dict[name] = v
+        checkpoint["net"] = new_state_dict
+
+        self.net.load_state_dict(checkpoint["net"])
+        self.mesh_memory.memory = checkpoint["mesh_memory"]
+        self.mesh_memory.clutter_bank = checkpoint["clutter_bank"]
+
     def save_state(self, save_path: "Path") -> None:
 
         # Save Model and Config

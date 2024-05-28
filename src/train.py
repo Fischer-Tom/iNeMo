@@ -1,11 +1,9 @@
-from copy import deepcopy
 from os.path import join
 
 import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 import wandb
-from tqdm import tqdm
 
 from src.lib.mesh_utils import load_off
 from src.lib.renderer import RenderEngine

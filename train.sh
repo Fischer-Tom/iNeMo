@@ -4,4 +4,4 @@ ROOT="/home/fischer/iNeMo/"
 
 cd $ROOT
 
-python "src/train.py"
+python "src/train.py" "$@"

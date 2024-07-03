@@ -29,4 +29,5 @@ classes: ["aeroplane",
           "train",
           "tvmonitor"]
 etf_init: 20
-n_tasks: 4
+init_task: 3
+task_incr: 3

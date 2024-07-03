@@ -322,7 +322,6 @@ class iNeMo(nn.Module):
         max_2 = torch.topk(max_score, 2, dim=1).values
         diff = 1 - (max_2[..., 0:1, :] - max_2[..., 1:2, :])
         score = torch.max((max_score - max_cl - diff), dim=2).values
-
         return torch.argmax(score, dim=1).flatten().cpu().detach()
 
     def _pose_estimation(

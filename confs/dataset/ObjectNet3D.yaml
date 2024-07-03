@@ -13,11 +13,12 @@ seen_classes: ~
 for_test: ~
 augment: true
 image_shape: [640, 800]
-memory_budget: 1000
+memory_budget: 2000
 viewport: 2000
 focal_length: 1
 etf_init: 100
-n_tasks: 10
+init_task: 50
+task_incr: 10
 classes: [aeroplane,
           ashtray,
           backpack,

@@ -29,6 +29,11 @@ class BaseTrainer:
         self.criterion = criterion
         self.optimizer = None
         self.cfg = cfg
+        self.n_tasks = (
+            1
+            + (len(cfg.dataset.classes) - cfg.dataset.init_task)
+            // cfg.dataset.task_incr
+        )
 
     def _lr_update(self, epoch: int, cfg: "DictConfig") -> None:
         if (epoch - 1) % cfg.update_lr_epoch_n == 0:
@@ -37,7 +42,7 @@ class BaseTrainer:
                 param_group["lr"] = lr
 
     def train_incremental(self, dataset, cfg: "DictConfig") -> None:
-        for n in range(dataset.cfg.n_tasks):
+        for n in range(self.n_tasks):
             train_loader, test_loader = self._setup_task(dataset, cfg)
             if n > 0:
                 self.model.module.set_old_net()

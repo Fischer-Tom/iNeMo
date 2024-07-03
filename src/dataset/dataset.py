@@ -21,7 +21,8 @@ class DatasetCfg:
     viewport: int
     classes: ListConfig[str]
     etf_init: int
-    n_tasks: int
+    task_incr: int
+    init_task: int
     for_test: bool = MISSING
     root_path: str = MISSING
     seen_classes: ListConfig[str] = MISSING
@@ -48,12 +49,10 @@ class IncrementalDataset(Dataset):
     def next_task_classes(self) -> ListConfig[str]:
         if self.cfg.for_test:
             return self.cfg.seen_classes
-        class_increment = len(self.cfg.classes) // self.cfg.n_tasks
-        start_index = (
-            0
-            if (self.cfg.seen_classes is None or self.cfg.for_test)
-            else len(self.cfg.seen_classes)
-        )
+        initial_task = self.cfg.seen_classes is None
+
+        start_index = 0 if initial_task else len(self.cfg.seen_classes)
+        class_increment = self.cfg.init_task if initial_task else self.cfg.task_incr
         task_categories = self.cfg.classes[start_index : start_index + class_increment]
         self.cfg.seen_classes = self.cfg.classes[: start_index + class_increment]
         return task_categories

@@ -58,12 +58,12 @@ class BaseTrainer:
                     tepochs.set_description(
                         f"Task: {n}, Epoch={epoch}, Loss={loss:.4f}"
                     )
+            if dataset.cfg.memory_budget > 0:
+                # Fill Replay Memory
+                dataset.build_replay_memory()
 
-            # Fill Replay Memory
-            dataset.build_replay_memory()
-
-            # Even out Backround Model with Replay Memory
-            self.model.module.fill_background_model(dataset.memory)
+                # Even out Backround Model with Replay Memory
+                self.model.module.fill_background_model(dataset.memory)
 
             # Validate
             accuracy, pose_acc_pi6, pose_acc_pi18 = self.validate(

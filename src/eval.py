@@ -115,7 +115,7 @@ def main(cfg: DictConfig) -> None:
 
     # Setup and run training
     trainer, test_loader = setup_training(args.ckpt_path, cfg)
-    trainer.validate(test_loader, run_pe=False)
+    trainer.validate(test_loader, run_pe=True)
 
 
 if __name__ == "__main__":

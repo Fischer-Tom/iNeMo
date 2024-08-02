@@ -78,7 +78,7 @@ def get_init_pose(
 def pre_render(get_samples, objects_texture, render_engine, xverts, xfaces):
     pre_rendered_maps = []
 
-    class_labels = torch.arange(0, objects_texture.shape[0]).cuda()
+    class_labels = torch.arange(0, len(xverts)).cuda()
 
     for sample_ in get_samples:
         t = torch.ones(1).cuda() * sample_[2]

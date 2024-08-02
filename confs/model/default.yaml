@@ -1,0 +1,18 @@
+num_clutter: 5
+mesh_dim: 128
+weight_noise: 5e-3
+
+extractor:
+  name: resnetext
+  extractor_dim: 256
+  local_size: 1
+  pretrain: True
+  downsample_rate: 8
+
+
+mesh:
+  distance_thr: 6
+  bank_size: 512
+  momentum: 0.9
+  max_n: ~
+  n_list: ~

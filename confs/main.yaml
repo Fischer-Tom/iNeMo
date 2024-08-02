@@ -1,0 +1,39 @@
+
+defaults:
+  - _self_
+  - dataset: Pascal3D
+  - nemo: default
+  - model: default
+
+wandb:
+  project: iNeMo
+  notes: placeholder
+  mode: disabled
+
+seed: 101010
+
+mode: train
+
+
+checkpointing:
+  log_dir: ~
+  load_path: ~
+  save_path: ~
+
+data_loader:
+  train:
+    num_workers: 16
+    persistent_workers: true
+    batch_size: 16
+    seed: 1234
+  test:
+    num_workers: 4
+    persistent_workers: false
+    batch_size: 1
+    seed: 2345
+
+optimizer:
+  update_lr_epoch_n: 10
+  update_lr_: 0.2
+  lr: 1e-5
+  weight_decay: 1e-4

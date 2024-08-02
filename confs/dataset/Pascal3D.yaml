@@ -1,0 +1,33 @@
+paths:
+  train_path: "/share_chairilg/data/Pascal3D+/PASCAL3D_train_NeMo"
+  test_path: "/share_chairilg/data/Pascal3D+/PASCAL3D_val_NeMo"
+  mesh_path: "/share_chairilg/data/Pascal3D+/CAD_single"
+  image_folder: "images"
+  list_folder: "lists3D"
+  anno_folder: "annotations3D"
+  dtd_path: "/share_chairilg/data/describable_textures_dataset"
+
+name: "Pascal3D"
+root_path: ~
+seen_classes: ~
+for_test: ~
+augment: true
+image_shape: [640, 800]
+memory_budget: 240
+viewport: 3000
+focal_length: 1
+classes: ["aeroplane",
+          "bicycle",
+          "boat",
+          "bottle",
+          "bus",
+          "car",
+          "chair",
+          "diningtable",
+          "motorbike",
+          "sofa",
+          "train",
+          "tvmonitor"]
+etf_init: 20
+init_task: 3
+task_incr: 3

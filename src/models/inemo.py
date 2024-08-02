@@ -1,0 +1,444 @@
+import itertools
+import math
+from dataclasses import dataclass
+from copy import deepcopy
+
+import numpy as np
+import torch
+from einops import einsum, rearrange
+from torch.utils.data import default_collate
+import torch.nn.functional as F
+from torch import tensor as Tensor
+import torch.nn as nn
+
+from src.lib.inference_utils import cal_pose_err, get_init_pose, loss_fun, pre_render
+from src.lib.mesh_utils import (
+    cal_rotation_matrix,
+    camera_position_to_spherical_angle,
+    get_cube_proj,
+)
+from src.lib.renderer import MeshInterpolateModule
+
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from torch.utils.data import DataLoader
+    from omegaconf import DictConfig
+    from src.models.memory import MeshMemory
+    from src.lib.renderer import RenderEngine
+    from torch.nn import Module
+    from os.path import Path
+
+
+@dataclass
+class TrainerCfg:
+    pad_index: Tensor
+    xverts: list[Tensor]
+    xfaces: list[Tensor]
+    n_classes: int
+    weight_noise: float
+    eps: float = 1e5
+    noise_loss_weight: float = 0.1
+    n_gpus: int = 1
+
+
+@dataclass
+class ValidationCfg:
+    inf_epochs: int = 30
+    inf_bs: int = 8
+    inf_lr: float = 5e-2
+    inf_adam_beta_0: float = 0.4
+    inf_adam_beta_1: float = 0.6
+    inf_adam_eps: float = 1e-8
+    inf_adam_weight_decay: float = 0.0
+
+
+@dataclass
+class ParamCfg:
+    pos_reg: float
+    kd_reg: float
+    kappa_main: float
+    kappa_kd: float
+    kappa_pos: float
+    freeze_first_n_epochs: int
+
+
+class iNeMo(nn.Module):
+    cfg: TrainerCfg
+    inf_cfg: ValidationCfg
+    current_pad_index: Tensor
+    n_classes: int = None
+    current_task_id: int = 0
+
+    def __init__(
+        self,
+        net: "Module",
+        memory: "MeshMemory",
+        renderer: "RenderEngine",
+        criterion: "Module",
+        train_cfg: dict,
+        param_cfg: "DictConfig",
+        inf_cfg: "DictConfig",
+    ) -> None:
+        super().__init__()
+        self.net = net
+        self.old_net = None
+        self.mesh_memory = memory
+        self.renderer = renderer
+        self.criterion = criterion
+        self.optimizer = None
+        self.cfg = TrainerCfg(**train_cfg)
+        self.param_cfg = ParamCfg(**param_cfg)
+        self.inf_cfg = ValidationCfg(**inf_cfg)
+
+    def set_old_net(self) -> None:
+        if self.param_cfg.kd_reg > 0:
+            self.old_net = deepcopy(self.net)
+            self.old_net.requires_grad_(False)
+            self.old_net.train()
+
+    def load_state(self, load_path: "Path") -> None:
+        checkpoint = torch.load(load_path)
+        from collections import OrderedDict
+
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint["net"].items():
+            name = k[7:]  # remove `module.`
+            new_state_dict[name] = v
+        checkpoint["net"] = new_state_dict
+
+        self.net.load_state_dict(checkpoint["net"])
+        self.mesh_memory.memory = checkpoint["mesh_memory"]
+        self.mesh_memory.clutter_bank = checkpoint["clutter_bank"]
+
+    def save_state(self, save_path: "Path") -> None:
+
+        # Save Model and Config
+        save_dict = {
+            "net": deepcopy(self.net.state_dict()),
+            "mesh_memory": deepcopy(self.mesh_memory.memory),
+            "clutter_bank": deepcopy(self.mesh_memory.clutter_bank),
+        }
+        torch.save(save_dict, save_path)
+
+    def inference(
+        self, sample, compare_bank, pre_rendered_maps, pre_rendered_poses, run_pe
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        img, label, idx, pose = self._to_device(sample)
+        pred_features = self.net(img)
+        clutter_score = rearrange(
+            einsum(
+                self.mesh_memory.clutter_bank,
+                pred_features,
+                "c k, b c h w -> b k h w",
+            ),
+            "b k h w -> b k (h w)",
+        )
+        cls_pred = self._classify(compare_bank, pred_features, clutter_score)
+
+        if run_pe:
+            C, theta = get_init_pose(
+                pre_rendered_poses,
+                pre_rendered_maps[cls_pred],
+                pred_features,
+                clutter_score=clutter_score,
+                device=img.device,
+            )
+            pose_error = self._pose_estimation(
+                pred_features, compare_bank, cls_pred, C, theta, pose
+            )
+        else:
+            pose_error = Tensor([2 * torch.pi])
+
+        return cls_pred, label, pose_error
+
+    @torch.no_grad()
+    def fill_background_model(self, replay_memory: list[dict]) -> None:
+        self.net.eval()
+        bank_size = self.mesh_memory.cfg.bank_size
+        n_iter = max(0, bank_size // len(replay_memory))
+        for _ in range(n_iter):
+            for i, sample in enumerate(replay_memory):
+                sample = default_collate([sample])
+                img, label, idx, pose = self._to_device(sample)
+                keypoint, kpvis, mask, projection = self._annotate(pose, label)
+                features = self.net(img, kp=keypoint, mask=1 - mask)
+
+                _, _ = self.mesh_memory.forward(
+                    features, kpvis, label, updateVertices=False
+                )
+
+    def _to_device(
+        self, sample: Tensor, device="cuda"
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        # TODO: Account for multi-gpu
+        img, img_label, pose = (
+            sample["img"].to(device),
+            sample["label"].to(device),
+            sample["pose"].to(device),
+        )
+        idx = (
+            self.mesh_memory.cfg.max_n * img_label[:, None]
+            + torch.arange(0, self.mesh_memory.cfg.max_n, device=device)[None, :]
+        )
+        return img, img_label, idx, pose
+
+    def forward(self, sample: Tensor) -> tuple[float, float, float]:
+
+        img, label, idx, pose = self._to_device(sample)
+        keypoint, kpvis, mask, projection = self._annotate(pose, label)
+        features = self.net(img, kp=keypoint, mask=1 - mask)
+
+        similarity, noise_similarity = self.mesh_memory.forward(features, kpvis, label)
+        neighborhood_mask = self._remove_neighbors(keypoint, label)
+        masked_similarity = similarity - neighborhood_mask
+
+        masked_similarity = rearrange(masked_similarity, "b c v -> (b c) v")
+        kpvis = rearrange(kpvis, "b c -> (b c)").type(torch.bool)
+        idx = rearrange(idx, "b c -> (b c)")
+
+        nemo_loss = self.criterion(
+            self.param_cfg.kappa_main * masked_similarity[kpvis, :],
+            idx[kpvis],
+        )
+        noise_loss = torch.mean(noise_similarity) * self.cfg.noise_loss_weight
+
+        loss_pos_reg = Tensor(0.0, device=img.device)
+        loss_kd = Tensor(0.0, device=img.device)
+
+        if self.param_cfg.pos_reg > 0.0 and self.mesh_memory.ETF is not None:
+            class_reg, reg_labels = self.mesh_memory.class_contrastive(features, label)
+            loss_pos_reg = self.criterion(
+                class_reg[kpvis, :],
+                reg_labels[kpvis],
+            )
+        if self.old_net is not None and self.param_cfg.kd_reg >= 0.0:
+            loss_kd = self._kd_loss(img, keypoint, mask, kpvis, features)
+        loss = nemo_loss + noise_loss
+
+        return (
+            loss,
+            self.param_cfg.pos_reg * loss_pos_reg,
+            self.param_cfg.kd_reg * loss_kd,
+        )
+
+    def _annotate(
+        self, pose: Tensor, label: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        annotations = self.renderer.get_annotations(
+            rearrange(self.mesh_memory.memory, "b c v -> b v c"),
+            pose,
+            label,
+            self.cfg.xverts,
+            self.cfg.xfaces,
+            label.device,
+        )
+        return annotations
+
+    def _kd_loss(
+        self,
+        img: Tensor,
+        keypoints: Tensor,
+        mask: Tensor,
+        kpvis: Tensor,
+        new_feats: Tensor,
+    ) -> Tensor:
+
+        old_feats = self.old_net(img, kp=keypoints, mask=1 - mask)
+        old_similarity = self.mesh_memory.forward_kd(old_feats, self.n_prev_classes)
+        new_similarity = self.mesh_memory.forward_kd(new_feats, self.n_prev_classes)
+
+        soft_targets = F.log_softmax(
+            self.param_cfg.kd_reg * old_similarity[kpvis, :], dim=-1
+        )
+        soft_probs = F.log_softmax(
+            self.param_cfg.kd_reg * new_similarity[kpvis, :], dim=-1
+        )
+        kd_loss = F.kl_div(
+            soft_probs, soft_targets, reduction="batchmean", log_target=True
+        )
+        return kd_loss
+
+    @torch.no_grad()
+    def _remove_neighbors(self, keypoints: Tensor, img_label: Tensor) -> Tensor:
+        zeros = torch.zeros(
+            keypoints.shape[0],
+            self.mesh_memory.cfg.max_n,
+            self.mesh_memory.cfg.max_n * self.mesh_memory.memory.shape[0],
+            device=keypoints.device,
+        )
+        distance = torch.sum(
+            (torch.unsqueeze(keypoints, dim=1) - torch.unsqueeze(keypoints, dim=2)).pow(
+                2,
+            ),
+            dim=3,
+        ).pow(0.5)
+        if self.mesh_memory.cfg.num_clutter == 0:
+            return (
+                (distance <= self.mesh_memory.cfg.distance_thr).type(torch.float32)
+                - torch.eye(keypoints.shape[1], device=distance.device).unsqueeze(dim=0)
+            ) * self.cfg.eps
+        else:
+            tem = (distance <= self.mesh_memory.cfg.distance_thr).type(
+                torch.float32
+            ) - torch.eye(keypoints.shape[1], device=distance.device).unsqueeze(dim=0)
+
+            for i in range(tem.shape[0]):
+                zeros[
+                    i,
+                    :,
+                    img_label[i] * tem.shape[1] : (img_label[i] + 1) * tem.shape[1],
+                ] = (
+                    tem[i] * self.cfg.eps
+                )
+            zeros[:, :, self.current_pad_index] = self.cfg.eps
+
+            return torch.cat(
+                [
+                    zeros,
+                    -torch.ones(
+                        keypoints.shape[0:2]
+                        + (
+                            self.mesh_memory.cfg.num_clutter
+                            * self.mesh_memory.cfg.bank_size,
+                        ),
+                        dtype=torch.float32,
+                        device=zeros.device,
+                    )
+                    * math.log(self.cfg.weight_noise),
+                ],
+                dim=2,
+            )
+
+    @torch.no_grad()
+    def _classify(
+        self, compare_bank: Tensor, pred_features: Tensor, clutter_score: Tensor
+    ) -> Tensor:
+        flat_features = rearrange(pred_features, "b c h w -> b c (h w)")
+        score_per_pixel = einsum(compare_bank, flat_features, "n v c, b c p -> b n v p")
+        max_cl = torch.max(clutter_score, dim=1, keepdim=True).values
+        max_score = torch.max(score_per_pixel, dim=2).values
+        max_2 = torch.topk(max_score, 2, dim=1).values
+        diff = 1 - (max_2[..., 0:1, :] - max_2[..., 1:2, :])
+        score = torch.max((max_score - max_cl - diff), dim=2).values
+
+        return torch.argmax(score, dim=1).flatten().cpu().detach()
+
+    def _pose_estimation(
+        self,
+        pred_features: Tensor,
+        compare_bank: Tensor,
+        cls_pred: Tensor,
+        C: Tensor,
+        theta: Tensor,
+        pose_gd: Tensor,
+    ) -> Tensor:
+        errors = []
+        for b, pred in enumerate(pred_features):
+            C_i = torch.nn.Parameter(C[b : b + 1], requires_grad=True)
+            theta_i = torch.nn.Parameter(theta[b : b + 1], requires_grad=True)
+
+            optim = torch.optim.Adam(
+                params=[C_i, theta_i],
+                lr=self.inf_cfg.inf_lr,
+                betas=(self.inf_cfg.inf_adam_beta_0, self.inf_cfg.inf_adam_beta_1),
+            )
+            xvert, xface = self.cfg.xverts[cls_pred[b]], self.cfg.xfaces[cls_pred[b]]
+            inter_module = MeshInterpolateModule(
+                xvert.cuda(),
+                xface.cuda(),
+                compare_bank[cls_pred[b]],
+                self.renderer.rasterizer,
+            )
+            inter_module = inter_module.cuda()
+
+            for epoch in range(self.inf_cfg.inf_epochs):
+                loss = self._regress_pose(pred, C_i, theta_i, inter_module)
+
+                optim.zero_grad()
+                loss.backward()
+                optim.step()
+            (
+                distance_pred,
+                elevation_pred,
+                azimuth_pred,
+            ) = camera_position_to_spherical_angle(C_i.clone().detach())
+            pred_matrix = cal_rotation_matrix(
+                theta_i.clone().detach(), elevation_pred, azimuth_pred, distance_pred
+            )
+            gd_matrix = cal_rotation_matrix(
+                pose_gd[:, 3], pose_gd[:, 1], pose_gd[:, 2], pose_gd[:, 0]
+            )
+            error = cal_pose_err(
+                np.array(gd_matrix[0].cpu(), dtype=np.float64),
+                np.array(pred_matrix[0].cpu(), dtype=np.float64),
+            )
+            errors.append(error)
+        return Tensor(errors)
+
+    def _regress_pose(
+        self, predicted_features: Tensor, C: Tensor, theta: Tensor, render_module
+    ) -> Tensor:
+        projected_map, obj_height, obj_width = get_cube_proj(C, theta, render_module)
+        projected_map = projected_map[
+            ...,
+            obj_height[0] : obj_height[1],
+            obj_width[0] : obj_width[1],
+        ].squeeze()
+        masked_features = predicted_features[
+            ...,
+            obj_height[0] : obj_height[1],
+            obj_width[0] : obj_width[1],
+        ]
+        object_score = torch.sum(projected_map * masked_features, dim=0)
+
+        clutter_score = einsum(
+            self.mesh_memory.clutter_bank, masked_features, "c v, c h w -> v h w"
+        )
+        clutter_score = torch.max(clutter_score, dim=0).values
+        return loss_fun(object_score, clutter_score)
+
+    def visualize_samples(self, loader: "DataLoader") -> None:
+        from src.tools.visualize import convert_to, visualize_keypoints
+        import matplotlib.pyplot as plt
+
+        for i, sample in enumerate(loader):
+            img, label, idx, pose = self._to_device(sample)
+            keypoint, kpvis, mask, projection = self._annotate(pose, label)
+            img_pil = visualize_keypoints(
+                img[0].cpu(),
+                keypoint[0, :, [1, 0]].cpu().numpy() * 8,
+                kpvis[0].cpu().numpy(),
+            )
+
+            plt.imshow(img_pil)
+            plt.show()
+
+    def set_current_pad_index(self, n_seen_classes: int) -> None:
+        self.current_task_id += 1
+        self.current_pad_index = Tensor(
+            [
+                vertex
+                for vertices in self.cfg.pad_index[:n_seen_classes]
+                for vertex in vertices
+            ],
+            dtype=torch.long,
+        )
+        self.n_prev_classes = (
+            0 if self.n_classes is None else n_seen_classes - self.n_classes
+        )
+        self.n_classes = n_seen_classes
+
+    @torch.no_grad()
+    def _pre_render(
+        self, compare_bank: Tensor
+    ) -> tuple[Tensor, list[tuple[float, float, float]]]:
+        azum_s = np.linspace(0, np.pi * 2, 12, endpoint=False, dtype=np.float32)
+        elev_s = np.linspace(-np.pi / 6, np.pi / 3, 4, dtype=np.float32)
+        theta_s = np.linspace(-np.pi / 6, np.pi / 6, 3, dtype=np.float32)
+        c_poses = list(itertools.product(azum_s, elev_s, theta_s))
+        pre_rendered_maps = pre_render(
+            c_poses, compare_bank, self.renderer, self.cfg.xverts, self.cfg.xfaces
+        )
+        return pre_rendered_maps, c_poses
